@@ -15,8 +15,8 @@ data SExpr = IntLiteral Integer
            | List [SExpr]
              deriving (Show)
 
-data TDecl = Ptr TDecl
-           | Const TDecl
+data TType = Ptr TType
+           | Mutable TType
            | Type Term
              deriving (Show)
 
@@ -24,13 +24,13 @@ data Term = TName          { tsrepr :: String }
           | TIntLiteral    { tirepr :: Integer }
           | TFloatLiteral  { tfrepr :: Float }
           | TStringLiteral { tsrepr :: String }
-          | TListLiteral   { elems :: [Term] }
           | TFuncall       { tfun :: Term, targs :: [Term] }
-          | TDef           { tname :: Term, tdecl :: TDecl, tvalue :: Maybe Term }
-          | TLambda        { ttype :: Term, tbindings :: [TDecl], tbody :: [Term] }
-          | TStruct        { tname :: Term, tfields :: [Term] }
-          | TMacro         { tname :: Term, tbindings :: [TDecl], tbody :: [Term] }
-          | TTemplate      { tname :: Term, tbindings :: [TDecl], tbody :: [Term] }
+          | TDecl          { tname :: String, ttype :: TType }
+          | TDef           { tname :: String, ttype :: TType, tvalue :: Maybe Term }
+          | TLambda        { ttype :: TType, tbindings :: [Term], tbody :: [Term] }
+          | TStruct        { tname :: String, tfields :: [Term] }
+          | TMacroDef      { tname :: String, tbindings :: [Term], tbody :: [Term] }
+          | TTemplate      { tname :: String, tbindings :: [Term], tbody :: [Term] }
             deriving (Show)
 
 -- Parser functions
@@ -116,21 +116,46 @@ readAll = do
   eof
   return result
 
--- Interface
-
 sexprToTerm :: SExpr -> Term
 sexprToTerm (IntLiteral i) = TIntLiteral { tirepr=i }
 sexprToTerm (FloatLiteral f) = TFloatLiteral { tfrepr=f }
 sexprToTerm (SymbolLiteral s) = TName { tsrepr=s }
 sexprToTerm (StringLiteral s) = TStringLiteral { tsrepr=s }
-sexprToTerm (List (e:es)) = listToTerm e es
-sexprToTerm (List []) = error "Function call with no target"
+sexprToTerm (List l) = listToTerm l
 
-listToTerm :: SExpr -> [SExpr] -> Term
-listToTerm (SymbolLiteral "quote") list = TListLiteral (map sexprToTerm list)
-listToTerm func args = TFuncall { tfun=(sexprToTerm func), targs=(map sexprToTerm args) }
+listToTerm :: [SExpr] -> Term
+listToTerm ((SymbolLiteral "defmacro"):rest) = processDefmacro rest
+listToTerm ((SymbolLiteral "lambda"):rest) = processLambda rest
+listToTerm (func:args) = TFuncall { tfun=(sexprToTerm func), targs=(map sexprToTerm args) }
+
+defmacroArgSexprToTerm :: SExpr -> Term
+defmacroArgSexprToTerm (SymbolLiteral name) = TName { tsrepr=name }
+defmacroArgSexprToTerm x = error $ "Malformed macro argument: " ++ (show x)
+
+processDefmacro :: [SExpr] -> Term
+processDefmacro ((SymbolLiteral name):(List args):body) = TMacroDef { tname=name,
+                                                                      tbindings=(map defmacroArgSexprToTerm args),
+                                                                      tbody=(map sexprToTerm body) }
+processDefmacro x = error $ "Malformed macro definition: " ++ (show x)
+
+processLambda :: [SExpr] -> Term
+processLambda ((List args):rettype:body) = TLambda { ttype=(sexprToType rettype),
+                                                     tbindings=(map processLambdaArg args),
+                                                     tbody=(map sexprToTerm body)}
+processLambda x = error $ "Malformed lambda: " ++ (show x)
+
+processLambdaArg :: SExpr -> Term
+processLambdaArg (List ((SymbolLiteral name):argtype:[])) = TDecl { tname=name, ttype=(sexprToType argtype) }
+processLambdaArg x = error $ "Malformed lambda parameter: " ++ (show x)
+
+sexprToType :: SExpr -> TType
+sexprToType (List ((SymbolLiteral "*"):rest:[])) = Ptr (sexprToType rest)
+sexprToType (List ((SymbolLiteral "mut"):rest:[])) = Mutable (sexprToType rest)
+sexprToType x = Type (sexprToTerm x)
+
+-- Interface
 
 parseToplevel :: String -> [SExpr]
 parseToplevel input = case parse readAll "lisp" input of
                         Left err -> error $ "No match: " ++ show err
-                        Right val -> val
+                        Right val -> (map sexprToTerm val)
