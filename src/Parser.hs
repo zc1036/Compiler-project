@@ -17,6 +17,7 @@ data SExpr = IntLiteral Integer
 
 data TType = Ptr TType
            | Mutable TType
+           | Function TType [TType] -- rettype [args]
            | Type Term
              deriving (Show)
 
@@ -25,12 +26,10 @@ data Term = TName          { tsrepr :: String }
           | TFloatLiteral  { tfrepr :: Float }
           | TStringLiteral { tsrepr :: String }
           | TFuncall       { tfun :: Term, targs :: [Term] }
-          | TDecl          { tname :: String, ttype :: TType }
           | TDef           { tname :: String, ttype :: TType, tvalue :: Maybe Term }
           | TLambda        { ttype :: TType, tbindings :: [Term], tbody :: [Term] }
           | TStruct        { tname :: String, tfields :: [Term] }
-          | TMacroDef      { tname :: String, tbindings :: [Term], tbody :: [Term] }
-          | TTemplate      { tname :: String, tbindings :: [Term], tbody :: [Term] }
+          | TAssign        { vars :: [Term], value :: Term }
             deriving (Show)
 
 -- Parser functions
@@ -124,38 +123,31 @@ sexprToTerm (StringLiteral s) = TStringLiteral { tsrepr=s }
 sexprToTerm (List l) = listToTerm l
 
 listToTerm :: [SExpr] -> Term
-listToTerm ((SymbolLiteral "defmacro"):rest) = processDefmacro rest
+listToTerm ((SymbolLiteral "def"):name:t:value:[]) = TDef { tname=name, ttype=(sexprToType t), tvalue=(sexprToTerm value) }
 listToTerm ((SymbolLiteral "lambda"):rest) = processLambda rest
+listToTerm ((SymbolLiteral "="):rest) = TAssign { vars=(map sexprToTerm $ init rest),
+                                                  value=(sexprToTerm $ last rest) }
 listToTerm (func:args) = TFuncall { tfun=(sexprToTerm func), targs=(map sexprToTerm args) }
-
-defmacroArgSexprToTerm :: SExpr -> Term
-defmacroArgSexprToTerm (SymbolLiteral name) = TName { tsrepr=name }
-defmacroArgSexprToTerm x = error $ "Malformed macro argument: " ++ (show x)
-
-processDefmacro :: [SExpr] -> Term
-processDefmacro ((SymbolLiteral name):(List args):body) = TMacroDef { tname=name,
-                                                                      tbindings=(map defmacroArgSexprToTerm args),
-                                                                      tbody=(map sexprToTerm body) }
-processDefmacro x = error $ "Malformed macro definition: " ++ (show x)
 
 processLambda :: [SExpr] -> Term
 processLambda ((List args):rettype:body) = TLambda { ttype=(sexprToType rettype),
                                                      tbindings=(map processLambdaArg args),
-                                                     tbody=(map sexprToTerm body)}
+                                                     tbody=(map sexprToTerm body) }
 processLambda x = error $ "Malformed lambda: " ++ (show x)
 
 processLambdaArg :: SExpr -> Term
-processLambdaArg (List ((SymbolLiteral name):argtype:[])) = TDecl { tname=name, ttype=(sexprToType argtype) }
+processLambdaArg (List ((SymbolLiteral name):argtype:[])) = TDef { tname=name, ttype=(sexprToType argtype), tvalue=Nothing }
 processLambdaArg x = error $ "Malformed lambda parameter: " ++ (show x)
 
 sexprToType :: SExpr -> TType
 sexprToType (List ((SymbolLiteral "*"):rest:[])) = Ptr (sexprToType rest)
 sexprToType (List ((SymbolLiteral "mut"):rest:[])) = Mutable (sexprToType rest)
+sexprToType (List (rettype:args)) = Function (sexprToType rettype) (map sexprToType args)
 sexprToType x = Type (sexprToTerm x)
 
 -- Interface
 
-parseToplevel :: String -> [SExpr]
+parseToplevel :: String -> [Term]
 parseToplevel input = case parse readAll "lisp" input of
                         Left err -> error $ "No match: " ++ show err
                         Right val -> (map sexprToTerm val)
