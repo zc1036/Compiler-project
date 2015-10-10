@@ -17,6 +17,12 @@ data SExpr = IntLiteral Integer
            | List [SExpr]
              deriving (Show)
 
+-- The difference between TType here and TBuiltinType below is that
+-- the TTypes are the "objects" and the TBuiltinTypes are the
+-- handles/names that refer to those objects. That is to say, a
+-- TBuiltinType is an object in the language, but a TType is only
+-- known to the compiler.
+
 data TType = Ptr TType
            | Mutable TType
            | Function TType [TType] -- rettype [args]
@@ -30,8 +36,9 @@ data Term a = TName          { tag :: a, tsrepr :: String }
             | TStringLiteral { tag :: a, tsrepr :: String }
             | TFuncall       { tag :: a, tfun :: Term a, targs :: [Term a] }
             | TDef           { tag :: a, tname :: String, ttype :: TType, tvalue :: Maybe (Term a) }
-            | TLambda        { tag :: a, ttype :: TType, tbindings :: [Term a], tbody :: [Term a] }
-            | TStruct        { tag :: a, tname :: String, tfields :: [Term a] }
+            | TLambda        { tag :: a, rettype :: TType, tbindings :: [Term a], tbody :: [Term a] }
+            | TStruct        { tag :: a, tfields :: [(String, TType)], parent :: Term a }
+            | TBuiltinType   { tag :: a, tname :: String }
             | TAssign        { tag :: a, vars :: [Term a], value :: Term a }
               deriving (Show)
 
@@ -146,7 +153,7 @@ listToTerm [] = error "Empty function call"
 
 processLambda :: [SExpr] -> Term ()
 processLambda (rettype:(List args):body) = TLambda { tag=(),
-                                                     ttype=(sexprToType rettype),
+                                                     rettype=(sexprToType rettype),
                                                      tbindings=(map processLambdaArg args),
                                                      tbody=(map sexprToTerm body) }
 processLambda x = error $ "Malformed lambda: " ++ (show x)
