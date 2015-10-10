@@ -3,54 +3,48 @@
 
 module Analyzer where
 
-import Parser (Term, TType)
+import Utils (mapfold)
+import Parser
 import Data.Maybe
-import Data.Map.Lazy
+import qualified Data.Map.Lazy as Map
 
-type SymbolTable = Map (String, Int) TDef
-
-data AnalyzerTag = TypeTag TType
-                 | LambdaTag TType SymbolTable -- The type of the lambda and its lexical variables
-                 | Nothing
-                   deriving (Show)
-
+type SymbolTable = Map.Map String (Term (), Int)
+type AnalyzerTag = TType
 type TypedTerm = Term AnalyzerTag
 
 data AnalyzerState = AnalyzerState { symbols :: SymbolTable,       -- A map of declaration names to declarations,
-                                     currentScopeLevel :: Int,     -- the current scope level starting from 0 ascending
-                                     tterms :: [TypedTerms] }      -- the terms analyzed so far
+                                     scopeLevel :: Int }    -- the current scope level starting from 0 ascending
                      deriving (Show)
 
-analyzerStateTTerms :: AnalyzerState -> [TypedTerms]
-analyzerStateTTerms (AnalyzerState { tterms }) = tterms
-
-type AnalyzerResult = [TypedTerm] -- typed terms
-
--- Builds a default symbol map
 defaultSymTable :: SymbolTable
-defaultSymTable = 
+defaultSymTable = Map.empty
 
-analyze' :: [Term] -> AnalyzerState -> AnalyzerResult
+intType :: TType
+intType = Type "int"
 
-analyze' [] (AnalyzerState { tterms }) = tterms
+analyze' :: AnalyzerState -> Term () -> (AnalyzerState, TypedTerm)
 
-analyze' (def@(TDef { tname }):terms) state@(AnalyzerState { symbols, currentScope }) =
+analyze' state@(AnalyzerState { symbols, scopeLevel }) def@(TDef { tname, ttype, tvalue }) =
     if redeclaration then
-        error $ n ++ " redefined"
+        error $ tname ++ " redefined"
     else
-        analyze' terms (state { symbols=(insert (tname, currentScope) def symbols) })
-    where redeclaration = case (lookup tname symbols) of
-                            Just (scope, _) -> (scope == currentScope)
+        (state { symbols=(Map.insert tname (def, scopeLevel) symbols) },
+         TDef { tag=ttype, tname=tname, ttype=ttype, tvalue=analyzedValue })
+    where redeclaration = case (Map.lookup tname symbols) of
                             Nothing -> False
+                            Just (_, scope) -> (scope == scopeLevel)
+          analyzedValue = case tvalue of
+                            Nothing -> Nothing
+                            Just value -> Just $ snd (analyze' state value)
 
-analyze' ((TName { tsrepr }):terms) state@(AnalyzerState { symbols }) =
-    if declared then
-        analyze' terms state
-    else
-        error $ "Variable '" ++ tsrepr ++ "' undefined"
-    where declared = member tsrepr symbols
+analyze' state@(AnalyzerState { symbols }) (TName { tsrepr }) =
+    case (Map.lookup tsrepr symbols) of
+      Just (def, _) -> (state, TName { tsrepr=tsrepr, tag=(definitionType def) })
+      Nothing       -> error $ "Variable '" ++ tsrepr ++ "' undefined"
 
-analyze' (())
+analyze' state (TIntLiteral { tirepr }) = (state, TIntLiteral { tag=intType, tirepr=tirepr })
 
-analyze :: [Term] -> AnalyzerResult
-analyze terms = reverse (analyzerTypedTerms (analyze' terms $ AnalyzerState empty 0 []))
+analyze' _ x = error $ "Attempted to analyze invalid form " ++ (show x)
+
+analyze :: [Term ()] -> [TypedTerm]
+analyze terms = snd (mapfold analyze' (AnalyzerState { symbols=defaultSymTable, scopeLevel=0 }) terms)

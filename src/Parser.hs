@@ -1,4 +1,6 @@
 
+{-# LANGUAGE NamedFieldPuns #-}
+
 module Parser where
 
 import Text.ParserCombinators.Parsec
@@ -32,6 +34,8 @@ data Term a = TName          { tag :: a, tsrepr :: String }
             | TStruct        { tag :: a, tname :: String, tfields :: [Term a] }
             | TAssign        { tag :: a, vars :: [Term a], value :: Term a }
               deriving (Show)
+
+definitionType (TDef { ttype }) = ttype
 
 -- Parser functions
 
@@ -131,12 +135,14 @@ listToTerm ((SymbolLiteral "def"):name:t:value:[]) = case name of
                                                                   ttype=(sexprToType t),
                                                                   tvalue=Just (sexprToTerm value) }
                                                        _ -> error $ "Expected symbol in definition, got" ++ (show name)
+listToTerm ((SymbolLiteral "def"):_) = error "Invalid DEF syntax"
 
 listToTerm ((SymbolLiteral "lambda"):rest) = processLambda rest
 listToTerm ((SymbolLiteral "="):rest) = TAssign { tag=(),
                                                   vars=(map sexprToTerm $ init rest),
                                                   value=(sexprToTerm $ last rest) }
 listToTerm (func:args) = TFuncall { tag=(), tfun=(sexprToTerm func), targs=(map sexprToTerm args) }
+listToTerm [] = error "Empty function call"
 
 processLambda :: [SExpr] -> Term ()
 processLambda (rettype:(List args):body) = TLambda { tag=(),
