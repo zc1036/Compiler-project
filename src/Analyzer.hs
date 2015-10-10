@@ -1,44 +1,54 @@
 
+{-# LANGUAGE NamedFieldPuns #-}
+
 module Analyzer where
 
 import Parser (Term, TType)
 import Data.Maybe
 import Data.Map.Lazy
 
-data TypedTerm = TypedTerm { term :: Term, ttype :: TType }
+type SymbolTable = Map (String, Int) TDef
 
-data AnalyzerState = AnalyzerState { symbols :: Map String (Int TDef), -- A map of declaration names to declarations,
-                                     currentScope :: Int,              -- the current scope level starting from 0 ascending
-                                     tterms :: [TypedTerm] }
+data AnalyzerTag = TypeTag TType
+                 | LambdaTag TType SymbolTable -- The type of the lambda and its lexical variables
+                 | Nothing
+                   deriving (Show)
 
--- Simple accessor for AnalyzerState.tterms
-analyzerTypedTerms :: AnalyzerState -> [TypedTerm]
-analyzerTypedTerms (AnalyzerState { tterms=tterms }) = tterms
+type TypedTerm = Term AnalyzerTag
+
+data AnalyzerState = AnalyzerState { symbols :: SymbolTable,       -- A map of declaration names to declarations,
+                                     currentScopeLevel :: Int,     -- the current scope level starting from 0 ascending
+                                     tterms :: [TypedTerms] }      -- the terms analyzed so far
+                     deriving (Show)
+
+analyzerStateTTerms :: AnalyzerState -> [TypedTerms]
+analyzerStateTTerms (AnalyzerState { tterms }) = tterms
+
+type AnalyzerResult = [TypedTerm] -- typed terms
 
 -- Builds a default symbol map
-defaultSymTable :: Map String (Int TDef)
+defaultSymTable :: SymbolTable
 defaultSymTable = 
 
--- Returns Nothing on success, Maybe with an error string on failure
 analyze' :: [Term] -> AnalyzerState -> AnalyzerResult
 
-analyze' [] state = state
+analyze' [] (AnalyzerState { tterms }) = tterms
 
-analyze' (def@(TDef { tname=n }):terms) state@(AnalyzerState { symbols=symbols, currentScope=currentScope }) =
+analyze' (def@(TDef { tname }):terms) state@(AnalyzerState { symbols, currentScope }) =
     if redeclaration then
         error $ n ++ " redefined"
     else
-        analyze' terms (state { symbols=(insert n (currentScope, def) symbols) })
-    where redeclaration = case (lookup n symbols) of
+        analyze' terms (state { symbols=(insert (tname, currentScope) def symbols) })
+    where redeclaration = case (lookup tname symbols) of
                             Just (scope, _) -> (scope == currentScope)
                             Nothing -> False
 
-analyze' ((TName { tsrepr=repr }):terms) state@(AnalyzerState { symbols=symbols }) =
+analyze' ((TName { tsrepr }):terms) state@(AnalyzerState { symbols }) =
     if declared then
         analyze' terms state
     else
-        error $ "Variable '" ++ repr ++ "' undefined"
-    where declared = member repr symbols
+        error $ "Variable '" ++ tsrepr ++ "' undefined"
+    where declared = member tsrepr symbols
 
 analyze' (())
 

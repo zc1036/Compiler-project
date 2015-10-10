@@ -18,19 +18,20 @@ data SExpr = IntLiteral Integer
 data TType = Ptr TType
            | Mutable TType
            | Function TType [TType] -- rettype [args]
-           | Type Term
+           | Type String
              deriving (Show)
 
-data Term = TName          { tsrepr :: String }
-          | TIntLiteral    { tirepr :: Integer }
-          | TFloatLiteral  { tfrepr :: Float }
-          | TStringLiteral { tsrepr :: String }
-          | TFuncall       { tfun :: Term, targs :: [Term] }
-          | TDef           { tname :: String, ttype :: TType, tvalue :: Maybe Term }
-          | TLambda        { ttype :: TType, tbindings :: [Term], tbody :: [Term] }
-          | TStruct        { tname :: String, tfields :: [Term] }
-          | TAssign        { vars :: [Term], value :: Term }
-            deriving (Show)
+-- The type variable "a" stores arbitrary data in the tree structure
+data Term a = TName          { tag :: a, tsrepr :: String }
+            | TIntLiteral    { tag :: a, tirepr :: Integer }
+            | TFloatLiteral  { tag :: a, tfrepr :: Float }
+            | TStringLiteral { tag :: a, tsrepr :: String }
+            | TFuncall       { tag :: a, tfun :: Term a, targs :: [Term a] }
+            | TDef           { tag :: a, tname :: String, ttype :: TType, tvalue :: Maybe (Term a) }
+            | TLambda        { tag :: a, ttype :: TType, tbindings :: [Term a], tbody :: [Term a] }
+            | TStruct        { tag :: a, tname :: String, tfields :: [Term a] }
+            | TAssign        { tag :: a, vars :: [Term a], value :: Term a }
+              deriving (Show)
 
 -- Parser functions
 
@@ -115,39 +116,52 @@ readAll = do
   eof
   return result
 
-sexprToTerm :: SExpr -> Term
-sexprToTerm (IntLiteral i) = TIntLiteral { tirepr=i }
-sexprToTerm (FloatLiteral f) = TFloatLiteral { tfrepr=f }
-sexprToTerm (SymbolLiteral s) = TName { tsrepr=s }
-sexprToTerm (StringLiteral s) = TStringLiteral { tsrepr=s }
+sexprToTerm :: SExpr -> Term ()
+sexprToTerm (IntLiteral i) = TIntLiteral { tag=(), tirepr=i }
+sexprToTerm (FloatLiteral f) = TFloatLiteral { tag=(), tfrepr=f }
+sexprToTerm (SymbolLiteral s) = TName { tag=(), tsrepr=s }
+sexprToTerm (StringLiteral s) = TStringLiteral { tag=(), tsrepr=s }
 sexprToTerm (List l) = listToTerm l
 
-listToTerm :: [SExpr] -> Term
-listToTerm ((SymbolLiteral "def"):name:t:value:[]) = TDef { tname=name, ttype=(sexprToType t), tvalue=(sexprToTerm value) }
-listToTerm ((SymbolLiteral "lambda"):rest) = processLambda rest
-listToTerm ((SymbolLiteral "="):rest) = TAssign { vars=(map sexprToTerm $ init rest),
-                                                  value=(sexprToTerm $ last rest) }
-listToTerm (func:args) = TFuncall { tfun=(sexprToTerm func), targs=(map sexprToTerm args) }
+listToTerm :: [SExpr] -> Term ()
+listToTerm ((SymbolLiteral "def"):name:t:value:[]) = case name of
+                                                       SymbolLiteral repr ->
+                                                           TDef { tag=(),
+                                                                  tname=repr,
+                                                                  ttype=(sexprToType t),
+                                                                  tvalue=Just (sexprToTerm value) }
+                                                       _ -> error $ "Expected symbol in definition, got" ++ (show name)
 
-processLambda :: [SExpr] -> Term
-processLambda ((List args):rettype:body) = TLambda { ttype=(sexprToType rettype),
+listToTerm ((SymbolLiteral "lambda"):rest) = processLambda rest
+listToTerm ((SymbolLiteral "="):rest) = TAssign { tag=(),
+                                                  vars=(map sexprToTerm $ init rest),
+                                                  value=(sexprToTerm $ last rest) }
+listToTerm (func:args) = TFuncall { tag=(), tfun=(sexprToTerm func), targs=(map sexprToTerm args) }
+
+processLambda :: [SExpr] -> Term ()
+processLambda (rettype:(List args):body) = TLambda { tag=(),
+                                                     ttype=(sexprToType rettype),
                                                      tbindings=(map processLambdaArg args),
                                                      tbody=(map sexprToTerm body) }
 processLambda x = error $ "Malformed lambda: " ++ (show x)
 
-processLambdaArg :: SExpr -> Term
-processLambdaArg (List ((SymbolLiteral name):argtype:[])) = TDef { tname=name, ttype=(sexprToType argtype), tvalue=Nothing }
+processLambdaArg :: SExpr -> Term ()
+processLambdaArg (List ((SymbolLiteral name):argtype:[])) = TDef { tag=(),
+                                                                   tname=name,
+                                                                   ttype=(sexprToType argtype),
+                                                                   tvalue=Nothing }
 processLambdaArg x = error $ "Malformed lambda parameter: " ++ (show x)
 
 sexprToType :: SExpr -> TType
 sexprToType (List ((SymbolLiteral "*"):rest:[])) = Ptr (sexprToType rest)
 sexprToType (List ((SymbolLiteral "mut"):rest:[])) = Mutable (sexprToType rest)
 sexprToType (List (rettype:args)) = Function (sexprToType rettype) (map sexprToType args)
-sexprToType x = Type (sexprToTerm x)
+sexprToType (SymbolLiteral s) = Type s
+sexprToType x = error $ "Invalid type " ++ (show x)
 
 -- Interface
 
-parseToplevel :: String -> [Term]
+parseToplevel :: String -> [Term ()]
 parseToplevel input = case parse readAll "lisp" input of
                         Left err -> error $ "No match: " ++ show err
                         Right val -> (map sexprToTerm val)
