@@ -17,17 +17,17 @@ data SExpr = IntLiteral Integer
            | List [SExpr]
              deriving (Show)
 
--- The difference between TType here and TBuiltinType below is that
--- the TTypes are the "objects" and the TBuiltinTypes are the
+-- The difference between DeclType here and TBuiltinType below is that
+-- the DeclTypes are the "objects" and the TBuiltinTypes are the
 -- handles/names that refer to those objects. That is to say, a
--- TBuiltinType is an object in the language, but a TType is only
+-- TBuiltinType is an object in the language, but a DeclType is only
 -- known to the compiler.
 
-data TType = Ptr TType
-           | Mutable TType
-           | Function TType [TType] -- rettype [args]
-           | Type String
-             deriving (Show)
+data DeclType = DeclPtr DeclType
+              | DeclMutable DeclType
+              | DeclFunction DeclType [DeclType] -- rettype [args]
+              | TypeName String
+                deriving (Show)
 
 -- The type variable "a" stores arbitrary data in the tree structure
 data Term a = TName          { tag :: a, tsrepr :: String }
@@ -35,14 +35,11 @@ data Term a = TName          { tag :: a, tsrepr :: String }
             | TFloatLiteral  { tag :: a, tfrepr :: Float }
             | TStringLiteral { tag :: a, tsrepr :: String }
             | TFuncall       { tag :: a, tfun :: Term a, targs :: [Term a] }
-            | TDef           { tag :: a, tname :: String, ttype :: TType, tvalue :: Maybe (Term a) }
-            | TLambda        { tag :: a, rettype :: TType, tbindings :: [Term a], tbody :: [Term a] }
-            | TStruct        { tag :: a, tfields :: [(String, TType)], parent :: Term a }
-            | TBuiltinType   { tag :: a, tname :: String }
+            | TDef           { tag :: a, tname :: String, ttype :: DeclType, tvalue :: Maybe (Term a) }
+            | TLambda        { tag :: a, rettype :: DeclType, tbindings :: [Term a], tbody :: [Term a] }
+            | TStruct        { tag :: a, tfields :: [(String, DeclType)], parent :: Term a }
             | TAssign        { tag :: a, vars :: [Term a], value :: Term a }
               deriving (Show)
-
-definitionType (TDef { ttype }) = ttype
 
 -- Parser functions
 
@@ -165,11 +162,11 @@ processLambdaArg (List ((SymbolLiteral name):argtype:[])) = TDef { tag=(),
                                                                    tvalue=Nothing }
 processLambdaArg x = error $ "Malformed lambda parameter: " ++ (show x)
 
-sexprToType :: SExpr -> TType
-sexprToType (List ((SymbolLiteral "*"):rest:[])) = Ptr (sexprToType rest)
-sexprToType (List ((SymbolLiteral "mut"):rest:[])) = Mutable (sexprToType rest)
-sexprToType (List (rettype:args)) = Function (sexprToType rettype) (map sexprToType args)
-sexprToType (SymbolLiteral s) = Type s
+sexprToType :: SExpr -> DeclType
+sexprToType (List ((SymbolLiteral "*"):rest:[])) = DeclPtr (sexprToType rest)
+sexprToType (List ((SymbolLiteral "mut"):rest:[])) = DeclMutable (sexprToType rest)
+sexprToType (List (rettype:args)) = DeclFunction (sexprToType rettype) (map sexprToType args)
+sexprToType (SymbolLiteral s) = TypeName s
 sexprToType x = error $ "Invalid type " ++ (show x)
 
 -- Interface

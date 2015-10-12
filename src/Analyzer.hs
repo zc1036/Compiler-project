@@ -7,69 +7,106 @@ import Utils (mapfold, makeMap)
 import Parser
 import Data.Maybe
 import qualified Data.Map.Lazy as Map
+import Data.List (intercalate)
 
-type AnalyzerTag = TType
-type TypedTerm = Term AnalyzerTag
-type SymbolTable = Map.Map String (Term AnalyzerTag, Int)
+data TypeInfo = BuiltinType { typeid :: Int, name :: String }
+              | Struct { typeid :: Int, fields :: [(String, DeclType)], parent :: TypeInfo, name :: String }
+
+instance Show TypeInfo where
+    show (BuiltinType { name }) = "[builtin " ++ name ++ "]"
+    show (Struct { name }) = "[struct " ++ name ++ "]"
+
+-- After a DeclType has been looked up and verified, it becomes a
+-- QualifiedTypeInfo
+data QualifiedTypeInfo = Ptr QualifiedTypeInfo
+                       | Mutable QualifiedTypeInfo
+                       | Function QualifiedTypeInfo [QualifiedTypeInfo]
+                       | Unqualified TypeInfo
+
+instance Show QualifiedTypeInfo where
+    show (Ptr x) = (show x) ++ "*"
+    show (Mutable x) = "mut " ++ (show x)
+    show (Function rettype args) = "(" ++ (intercalate " " (map show args)) ++ " -> " ++ (show rettype)
+    show (Unqualified x) = show x
+
+-- A "Name" is a thing that is stored in the symbol table.
+data Name = Variable QualifiedTypeInfo
+          | Type TypeInfo
+            deriving (Show)
+
+type TypedTerm = Term QualifiedTypeInfo
+type SymbolTable = Map.Map String (Name, Int)
 
 data AnalyzerState = AnalyzerState { symbols :: SymbolTable, -- A map of declaration names to declarations,
-                                     scopeLevel :: Int }     -- the current scope level starting from globalScope ascending
+                                     scopeLevel :: Int,      -- the current scope level starting from globalScope ascending
+                                     nextTypeID :: Int }
                      deriving (Show)
 
 globalScope :: Int
 globalScope = 0
 
-intType = Type "int"
-floatType = Type "float"
-stringType = Type "string"
-typeType = Type "type" -- lol
+intTypeID = 0
+floatTypeID = 1
+stringTypeID = 2
+voidTypeID = 3
+startUserDefinedTypeIDs = voidTypeID + 1
+
+intType = BuiltinType { typeid=intTypeID, name="int" }
+floatType = BuiltinType { typeid=floatTypeID, name="float" }
+stringType = BuiltinType { typeid=stringTypeID, name="string" }
+voidType = BuiltinType { typeid=voidTypeID, name="void" }
 
 defaultSymTable :: SymbolTable
-defaultSymTable = makeMap [("int", (TBuiltinType { tname="int", tag=typeType }, globalScope)),
-                           ("float", (TBuiltinType { tname="float", tag=typeType }, globalScope)),
-                           ("string", (TBuiltinType { tname="string", tag=typeType }, globalScope)),
-                           ("type", (TBuiltinType { tname="type", tag=typeType }, globalScope))]
+defaultSymTable = makeMap [("int", (Type intType, globalScope)),
+                           ("float", (Type floatType, globalScope)),
+                           ("string", (Type stringType, globalScope))]
 
-isType :: AnalyzerState -> TType -> Bool
-isType s (Ptr t) = isType s t
-isType s (Mutable t) = isType s t
-isType s (Function rettype args) = (isType s rettype) && (foldl (&&) True (map (isType s) args))
-isType (AnalyzerState { symbols }) (Type name) =
+decltypeToTypeInfo :: AnalyzerState -> DeclType -> QualifiedTypeInfo
+decltypeToTypeInfo s (DeclPtr t) = Ptr (decltypeToTypeInfo s t)
+decltypeToTypeInfo s (DeclMutable (DeclMutable _)) = error "Repeated mutability specifier in type"
+decltypeToTypeInfo s (DeclMutable t) = Mutable (decltypeToTypeInfo s t)
+decltypeToTypeInfo s (DeclFunction rettype args) = Function (decltypeToTypeInfo s rettype) (map (decltypeToTypeInfo s) args)
+decltypeToTypeInfo (AnalyzerState { symbols }) (TypeName name) =
     case (Map.lookup name symbols) of
-      Just (TBuiltinType { }, _) -> True
-      Just (TStruct { }, _) -> True
-      _ -> False
+      Just (Type t, _) -> Unqualified t
+      _ -> error $ "Undefined typename '" ++ name ++ "'"
 
 analyze' :: AnalyzerState -> Term () -> (AnalyzerState, TypedTerm)
 
-analyze' state@(AnalyzerState { symbols, scopeLevel }) def@(TDef { tname, ttype, tvalue }) =
+analyze' state@(AnalyzerState { symbols, scopeLevel, nextTypeID }) (TDef { tname, ttype, tvalue }) =
     if redeclaration then
         error $ tname ++ " redefined"
-    else if (not (isType state ttype)) then
-        error $ (show ttype) ++ " is not a valid type (invalid type name)"
     else
-        (state { symbols=(Map.insert tname (def, scopeLevel) symbols) },
-         TDef { tag=ttype, tname=tname, ttype=ttype, tvalue=analyzedValue })
+        (state { symbols=(Map.insert tname (Variable (decltypeToTypeInfo state ttype), scopeLevel) symbols), nextTypeID=newNextTypeID },
+         TDef { tag=(Unqualified voidType), tname=tname, ttype=ttype, tvalue=analyzedValue })
     where redeclaration = case (Map.lookup tname symbols) of
-                            Nothing -> False
                             Just (_, scope) -> (scope == scopeLevel)
-          analyzedValue = case tvalue of
-                            Nothing -> Nothing
-                            Just value -> Just $ snd (analyze' state value)
+                            _ -> False
+          (newNextTypeID, analyzedValue) = fromMaybe (nextTypeID, Nothing) (do tvalue <- tvalue
+                                                                               let (substate, analyzed) = analyze' state tvalue
+                                                                               return ((Analyzer.nextTypeID substate), Just analyzed))
 
 analyze' state@(AnalyzerState { symbols }) (TName { tsrepr }) =
     case (Map.lookup tsrepr symbols) of
-      Just (def, _) -> (state, TName { tsrepr=tsrepr, tag=(definitionType def) })
-      Nothing       -> error $ "Variable '" ++ tsrepr ++ "' undefined"
+      Just (Variable vartype, _) -> (state, TName { tsrepr=tsrepr, tag=vartype })
+      Just (Type _, _)           -> error $ "Unexpected typename '" ++ tsrepr ++ "'"
+      Nothing                    -> error $ "Undefined symbol '" ++ tsrepr ++ "'"
 
 --analyze' state@(AnalyzerState { scopeLevel }) (TLambda { rettype, tbindings, tbody }) =
 --    case ee
 
-analyze' state (TIntLiteral { tirepr }) = (state, TIntLiteral { tag=intType, tirepr=tirepr })
-analyze' state (TFloatLiteral { tfrepr }) = (state, TFloatLiteral { tag=floatType, tfrepr=tfrepr })
-analyze' state (TStringLiteral { tsrepr }) = (state, TStringLiteral { tag=intType, tsrepr=tsrepr })
+analyze' state (TIntLiteral { tirepr }) = (state, TIntLiteral { tag=(Unqualified intType), tirepr=tirepr })
+analyze' state (TFloatLiteral { tfrepr }) = (state, TFloatLiteral { tag=(Unqualified floatType), tfrepr=tfrepr })
+analyze' state (TStringLiteral { tsrepr }) = (state, TStringLiteral { tag=(Unqualified stringType), tsrepr=tsrepr })
 
-analyze' _ x = error $ "Attempted to analyze invalid form " ++ (show x)
+analyze' _ x = error $ "Attempted to analyze unrecognized form " ++ (show x)
 
 analyze :: [Term ()] -> [TypedTerm]
-analyze terms = snd (mapfold analyze' (AnalyzerState { symbols=defaultSymTable, scopeLevel=globalScope }) terms)
+analyze terms = snd (analyzeWithState terms)
+
+analyzeWithState :: [Term ()] -> (AnalyzerState, [TypedTerm])
+analyzeWithState terms = mapfold
+                         analyze' (AnalyzerState { symbols=defaultSymTable,
+                                                   scopeLevel=globalScope,
+                                                   nextTypeID=startUserDefinedTypeIDs })
+                         terms
