@@ -16,6 +16,9 @@ instance Show TypeInfo where
     show (BuiltinType { name }) = "[builtin " ++ name ++ "]"
     show (Struct { name }) = "[struct " ++ name ++ "]"
 
+instance Eq TypeInfo where
+    (==) x y = (typeid x) == (typeid y)
+
 -- After a DeclType has been looked up and verified, it becomes a
 -- QualifiedTypeInfo
 data QualifiedTypeInfo = Ptr QualifiedTypeInfo
@@ -26,8 +29,15 @@ data QualifiedTypeInfo = Ptr QualifiedTypeInfo
 instance Show QualifiedTypeInfo where
     show (Ptr x) = (show x) ++ "*"
     show (Mutable x) = "mut " ++ (show x)
-    show (Function rettype args) = "(" ++ (intercalate " " (map show args)) ++ " -> " ++ (show rettype)
+    show (Function rettype args) = "(" ++ (intercalate " " (map show args)) ++ " -> " ++ (show rettype) ++ ")"
     show (Unqualified x) = show x
+
+instance Eq QualifiedTypeInfo where
+    (==) (Ptr x) (Ptr y) = x == y
+    (==) (Mutable x) (Mutable y) = x == y
+    (==) (Function rettype1 args1) (Function rettype2 args2) =
+        rettype1 == rettype2 && (length args1) == (length args2) && (foldl (&&) True (zipWith (==) args1 args2))
+    (==) (Unqualified x) (Unqualified y) = x == y
 
 -- A "Name" is a thing that is stored in the symbol table.
 data Name = Variable QualifiedTypeInfo
@@ -59,7 +69,8 @@ voidType = BuiltinType { typeid=voidTypeID, name="void" }
 defaultSymTable :: SymbolTable
 defaultSymTable = makeMap [("int", (Type intType, globalScope)),
                            ("float", (Type floatType, globalScope)),
-                           ("string", (Type stringType, globalScope))]
+                           ("string", (Type stringType, globalScope)),
+                           ("void", (Type voidType, globalScope))]
 
 decltypeToTypeInfo :: AnalyzerState -> DeclType -> QualifiedTypeInfo
 decltypeToTypeInfo s (DeclPtr t) = Ptr (decltypeToTypeInfo s t)
@@ -71,20 +82,45 @@ decltypeToTypeInfo (AnalyzerState { symbols }) (TypeName name) =
       Just (Type t, _) -> Unqualified t
       _ -> error $ "Undefined typename '" ++ name ++ "'"
 
+-- True if the first argument is compatible with the first (i.e. the
+-- second can be assigned to the first)
+typesAreCompatible :: QualifiedTypeInfo -> QualifiedTypeInfo -> Bool
+typesAreCompatible (Ptr x) (Unqualified (BuiltinType { typeid })) = typeid == intTypeID
+typesAreCompatible x y = typesAreCompatible' x y
+
+typesAreCompatible' :: QualifiedTypeInfo -> QualifiedTypeInfo -> Bool
+typesAreCompatible' (Ptr x) (Ptr y) = typesAreCompatible' x y
+typesAreCompatible' (Mutable x) (Mutable y) = typesAreCompatible' x y
+typesAreCompatible' (Unqualified x) (Unqualified y) = x == y
+typesAreCompatible' (Unqualified x) (Mutable (Unqualified y)) = x == y
+typesAreCompatible' (Ptr x) (Mutable (Ptr y)) = typesAreCompatible' x y -- A mutable pointer is convertible to an immutable pointer
+typesAreCompatible' (Function rettype1 args1) (Function rettype2 args2) =
+    -- Function types have to match exactly; check ret types, arg
+    -- counts, and then check each arg type and ensure they match exactly.
+    (rettype1 == rettype2) && (length args1) == (length args2) && (foldl (&&) True (zipWith (==) args1 args2))
+typesAreCompatible' _ _ = False
+
 analyze' :: AnalyzerState -> Term () -> (AnalyzerState, TypedTerm)
 
-analyze' state@(AnalyzerState { symbols, scopeLevel, nextTypeID }) (TDef { tname, ttype, tvalue }) =
-    if redeclaration then
-        error $ tname ++ " redefined"
-    else
-        (state { symbols=(Map.insert tname (Variable (decltypeToTypeInfo state ttype), scopeLevel) symbols), nextTypeID=newNextTypeID },
-         TDef { tag=(Unqualified voidType), tname=tname, ttype=ttype, tvalue=analyzedValue })
+analyze' state@(AnalyzerState { symbols, scopeLevel, nextTypeID }) (TDef { tname, ttype, tvalue })
+    | redeclaration = error $ tname ++ " redefined"
+    | typesAreIncompatible = error $ "Types " ++ (show typeOfVar) ++ " and " ++ (show (fromJust typeOfValue)) ++ " are incompatible "
+    | otherwise = (state { symbols=(Map.insert tname (Variable typeOfVar, scopeLevel) symbols), nextTypeID=newNextTypeID },
+                   TDef { tag=(Unqualified voidType), tname=tname, ttype=ttype, tvalue=analyzedValue })
     where redeclaration = case (Map.lookup tname symbols) of
                             Just (_, scope) -> (scope == scopeLevel)
                             _ -> False
-          (newNextTypeID, analyzedValue) = fromMaybe (nextTypeID, Nothing) (do tvalue <- tvalue
-                                                                               let (substate, analyzed) = analyze' state tvalue
-                                                                               return ((Analyzer.nextTypeID substate), Just analyzed))
+          (newNextTypeID, analyzedValue) = case tvalue of
+                                             Just declvalue -> let (substate, analyzed) = analyze' state declvalue
+                                                               in ((Analyzer.nextTypeID substate), Just analyzed)
+                                             Nothing        -> (nextTypeID, Nothing)
+          typeOfVar = (decltypeToTypeInfo state ttype)
+          typeOfValue = case analyzedValue of
+                          Just declvalue -> Just (tag declvalue)
+                          Nothing        -> Nothing
+          typesAreIncompatible = case typeOfValue of
+                                   Just typeOfValue' -> not (typesAreCompatible typeOfVar typeOfValue')
+                                   Nothing           -> False
 
 analyze' state@(AnalyzerState { symbols }) (TName { tsrepr }) =
     case (Map.lookup tsrepr symbols) of
