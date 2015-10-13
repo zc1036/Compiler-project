@@ -29,16 +29,27 @@ data DeclType = DeclPtr DeclType
               | TypeName String
                 deriving (Show)
 
--- The type variable "a" stores arbitrary data in the tree structure
+data LambdaArg = LambdaArg String DeclType
+                 deriving (Show)
+
+lambdaArgName :: LambdaArg -> String
+lambdaArgName (LambdaArg name _) = name
+
+lambdaArgType :: LambdaArg -> DeclType
+lambdaArgType (LambdaArg _ dtype) = dtype
+
+-- The type variable "a" allows storing arbitrary data in the tree
+-- structure in the "tag" field
 data Term a = TName          { tag :: a, tsrepr :: String }
             | TIntLiteral    { tag :: a, tirepr :: Integer }
             | TFloatLiteral  { tag :: a, tfrepr :: Float }
             | TStringLiteral { tag :: a, tsrepr :: String }
             | TFuncall       { tag :: a, tfun :: Term a, targs :: [Term a] }
             | TDef           { tag :: a, tname :: String, ttype :: DeclType, tvalue :: Maybe (Term a) }
-            | TLambda        { tag :: a, rettype :: DeclType, tbindings :: [Term a], tbody :: [Term a] }
+            | TLambda        { tag :: a, rettype :: DeclType, tbindings :: [LambdaArg], tbody :: [Term a] }
             | TStruct        { tag :: a, tfields :: [(String, DeclType)], parent :: Term a }
             | TAssign        { tag :: a, vars :: [Term a], value :: Term a }
+            | TReturn        { tag :: a, tvalue :: Maybe (Term a) }
               deriving (Show)
 
 -- Parser functions
@@ -140,8 +151,9 @@ listToTerm ((SymbolLiteral "def"):name:t:value:[]) = case name of
                                                                   tvalue=Just (sexprToTerm value) }
                                                        _ -> error $ "Expected symbol in definition, got" ++ (show name)
 listToTerm ((SymbolLiteral "def"):_) = error "Invalid DEF syntax"
-
 listToTerm ((SymbolLiteral "lambda"):rest) = processLambda rest
+listToTerm ((SymbolLiteral "return"):value:[]) = TReturn { tag=(), tvalue=Just (sexprToTerm value) }
+listToTerm ((SymbolLiteral "return"):[]) = TReturn { tag=(), tvalue=Nothing }
 listToTerm ((SymbolLiteral "="):rest) = TAssign { tag=(),
                                                   vars=(map sexprToTerm $ init rest),
                                                   value=(sexprToTerm $ last rest) }
@@ -155,11 +167,8 @@ processLambda (rettype:(List args):body) = TLambda { tag=(),
                                                      tbody=(map sexprToTerm body) }
 processLambda x = error $ "Malformed lambda: " ++ (show x)
 
-processLambdaArg :: SExpr -> Term ()
-processLambdaArg (List ((SymbolLiteral name):argtype:[])) = TDef { tag=(),
-                                                                   tname=name,
-                                                                   ttype=(sexprToType argtype),
-                                                                   tvalue=Nothing }
+processLambdaArg :: SExpr -> LambdaArg
+processLambdaArg (List ((SymbolLiteral name):argtype:[])) = LambdaArg name (sexprToType argtype)
 processLambdaArg x = error $ "Malformed lambda parameter: " ++ (show x)
 
 sexprToType :: SExpr -> DeclType
