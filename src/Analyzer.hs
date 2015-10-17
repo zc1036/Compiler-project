@@ -10,7 +10,7 @@ import qualified Data.Map.Lazy as Map
 import Data.List (intercalate, mapAccumL, elemIndex)
 
 data TypeInfo = BuiltinType { typeid :: Int, name :: String }
-              | Struct { typeid :: Int, fields :: [(String, DeclType)], parent :: TypeInfo, name :: String }
+              | Struct { typeid :: Int, fields :: [(String, QualifiedTypeInfo)], name :: String }
 
 instance Show TypeInfo where
     show (BuiltinType { name }) = "[builtin " ++ name ++ "]"
@@ -22,7 +22,7 @@ instance Eq TypeInfo where
 -- After a DeclType has been looked up and verified, it becomes a
 -- QualifiedTypeInfo
 data QualifiedTypeInfo = Ptr QualifiedTypeInfo
-                       | Array Int QualifiedTypeInfo
+                       | Array Integer QualifiedTypeInfo
                        | Mutable QualifiedTypeInfo
                        | Function QualifiedTypeInfo [QualifiedTypeInfo]
                        | Unqualified TypeInfo
@@ -83,7 +83,7 @@ defaultSymTable = makeMap [("int", (Type intType, globalScope)),
                            ("float", (Type floatType, globalScope)),
                            ("char", (Type charType, globalScope)),
                            ("void", (Type voidType, globalScope)),
-                           ("string", (Type charTtpe, globalScope))]
+                           ("string", (Type charType, globalScope))]
 
 isLvalue :: Term a -> Bool
 isLvalue (TName { }) = True
@@ -94,7 +94,7 @@ isLvalue _ = False
 
 decltypeToTypeInfo :: AnalyzerState -> DeclType -> QualifiedTypeInfo
 decltypeToTypeInfo s (DeclPtr t) = Ptr (decltypeToTypeInfo s t)
-decltypeToTypeInfo s (DeclArray size t) = Array size (decltypeToTypeInfo t)
+decltypeToTypeInfo s (DeclArray size t) = Array size (decltypeToTypeInfo s t)
 decltypeToTypeInfo s (DeclMutable (DeclMutable _)) = error "Repeated mutability specifier in type"
 decltypeToTypeInfo s (DeclMutable (DeclArray _ _)) = error "Cannot declare a mutable array (did you mean array of mutable?)"
 decltypeToTypeInfo s (DeclMutable t) = Mutable (decltypeToTypeInfo s t)
@@ -108,7 +108,6 @@ decltypeToTypeInfo (AnalyzerState { symbols }) (TypeName name) =
 -- object of the first type can be implicitly converted to an object
 -- of the second)
 typesAreCompatible :: QualifiedTypeInfo -> QualifiedTypeInfo -> Bool
-typesAreCompatible (Ptr x) (Array _ y) = typesAreCompatible x y
 typesAreCompatible (Ptr x) (Ptr y) = typesAreCompatible x y
 typesAreCompatible (Mutable x) (Mutable y) = typesAreCompatible x y
 typesAreCompatible x (Mutable y) = typesAreCompatible x y
@@ -119,9 +118,9 @@ typesAreCompatible (Function rettype1 args1) (Function rettype2 args2) =
     (rettype1 == rettype2) && (length args1) == (length args2) && (and (zipWith (==) args1 args2))
 typesAreCompatible _ _ = False
 
-isAssignable :: TypedTerm -> Bool
-isAssignable (Mutable _) = True
-isAssignable _ = False
+isMutable :: QualifiedTypeInfo -> Bool
+isMutable (Mutable _) = True
+isMutable _ = False
 
 isRedeclaration :: String -> SymbolTable -> Int -> Bool
 isRedeclaration name symbols scopeLevel = case Map.lookup name symbols of
@@ -191,25 +190,39 @@ analyze' state (TFuncall { tfun, targs }) =
                                              targs=analyzedArgs })
 
 analyze' state (TAssign { tavar, tavalue }) =
-    let (substate, analyzedVar) = analyzeWithState' state tavar
+    let (substate, analyzedVar) = analyze' state tavar
         (substate', analyzedValue) = analyze' substate tavalue in
-    if typesAreCompatible analyzedVar analyzedValue && isAssignable (tag tavar) && isLvalue tavar then
-        (state, TAssign { tag=tag tavar, tavar=analyzedVar, tavalue=analyzedValue })
+    if typesAreCompatible (tag analyzedVar) (tag analyzedValue) && isMutable (tag analyzedVar) && isLvalue tavar then
+        (state, TAssign { tag=tag analyzedVar, tavar=analyzedVar, tavalue=analyzedValue })
     else
         error $ "Illegal assignment to " ++ (show analyzedVar) ++ " of " ++ (show analyzedVar)
 
 analyze' state@(AnalyzerState { symbols, scopeLevel }) (TTypedef { ttypedefFrom, ttypedefTo })
-    | isRedeclaration ttypedefTo symbols scope = error $ "Duplicate declaration of " ++ ttypedefTo ++ " in typedef"
+    | isRedeclaration ttypedefTo symbols scopeLevel = error $ "Duplicate declaration of " ++ ttypedefTo ++ " in typedef"
     | otherwise = let newType = decltypeToTypeInfo state ttypedefFrom in
                   (state { symbols=Map.insert ttypedefTo (Type newType, scopeLevel) symbols },
                    TTypedef { tag=voidType, ttypedefFrom=ttypedefFrom, ttypedefTo=ttypedefTo })
 
 analyze' state@(AnalyzerState { symbols, scopeLevel, nextTypeID }) (TStruct { tfields, tname })
     | isRedeclaration tname symbols scopeLevel = error $ "Duplicate declaration of " ++ tname ++ " in struct definition"
-    | otherwise = 
+    | otherwise = (newstate, TStruct { tag=voidType, tfields=tfields, tname=tname })
+    where newstate = state { symbols=Map.insert tname (Type (Unqualified (Struct { typeid=nextTypeID, fields=map processFields tfields, name=tname })), scopeLevel) symbols,
+                             nextTypeID=nextTypeID + 1 }
+          processFields (name, decltype) = (name, decltypeToTypeInfo newstate decltype)
 
-analyze' state (TReturn { tvalue=Nothing }) =
-    (state, TReturn { tag=voidType, tvalue=Nothing })
+analyze' state (TReturn { tvalue=Nothing }) = (state, TReturn { tag=voidType, tvalue=Nothing })
+
+analyze' state (TDeref { toperand }) =
+    let (newstate, analyzedOp) = analyze' state toperand in
+    (newstate, TDeref { tag=derefType, toperand=analyzedOp })
+    where derefType (Mutable (Ptr x)) = x
+          derefType (Ptr x) = x
+          derefType x = error $ "Attempted to dereference non-pointer type " ++ (show x)
+
+analyze' state (TAddr { toperand }) =
+    let (newstate, analyzedOp) = analyze' state toperand in
+    (newstate, TDeref { tag=addrType, toperand=analyzedOp })
+    where addrType = 
 
 analyze' state (TIntLiteral { tirepr }) = (state, TIntLiteral { tag=intType, tirepr=tirepr })
 analyze' state (TFloatLiteral { tfrepr }) = (state, TFloatLiteral { tag=floatType, tfrepr=tfrepr })
@@ -244,9 +257,9 @@ find1 p f t@(TLambda { tbody })
     | f t = Just t
     | p t = recsearch (find1 p f) tbody
     | otherwise = Nothing
-find1 p f t@(TAssign { vars, value })
+find1 p f t@(TAssign { tavar, tavalue })
     | f t = Just t
-    | p t = recsearch (find1 p f) (value:vars)
+    | p t = recsearch (find1 p f) (tavar:tavalue:[])
     | otherwise = Nothing
 find1 p f t@(TReturn { tvalue=Just x })
     | f t = Just t

@@ -7,6 +7,7 @@ import Text.ParserCombinators.Parsec
 import System.Environment
 import Control.Monad
 import Data.Maybe
+import Data.List (intercalate)
 
 -- AST types
 
@@ -15,7 +16,13 @@ data SExpr = IntLiteral Integer
            | SymbolLiteral String
            | StringLiteral String
            | List [SExpr]
-             deriving (Show)
+
+instance Show SExpr where
+    show (IntLiteral x) = (show x)
+    show (FloatLiteral x) = (show x)
+    show (SymbolLiteral (_:rest)) = init rest
+    show (StringLiteral x) = show x
+    show (List x) = "(" ++ (intercalate " " (map show x)) ++ ")"
 
 -- The difference between DeclType here and TBuiltinType below is that
 -- the DeclTypes are the "objects" and the TBuiltinTypes are the
@@ -24,7 +31,7 @@ data SExpr = IntLiteral Integer
 -- known to the compiler.
 
 data DeclType = DeclPtr DeclType
-              | DeclArray Int DeclType
+              | DeclArray Integer DeclType
               | DeclMutable DeclType
               | DeclFunction DeclType [DeclType] -- rettype [args]
               | TypeName String
@@ -160,10 +167,10 @@ listToTerm ((SymbolLiteral "def"):_) = error "Invalid DEF syntax"
 listToTerm ((SymbolLiteral "lambda"):rest) = processLambda rest
 listToTerm ((SymbolLiteral "return"):value:[]) = TReturn { tag=(), tvalue=Just (sexprToTerm value) }
 listToTerm ((SymbolLiteral "return"):[]) = TReturn { tag=(), tvalue=Nothing }
-listToTerm ((SymbolLiteral "struct"):(SymbolLiteral name):fields) = TStruct { tag=(), tname=name, tfields=processStructFields fields }
+listToTerm ((SymbolLiteral "struct"):(SymbolLiteral name):fields) = TStruct { tag=(), tname=name, tfields=map processStructField fields }
 listToTerm ((SymbolLiteral "="):var:val:[]) = TAssign { tag=(),
                                                         tavar=sexprToTerm var,
-                                                        tavalue=sexprToTerm value }
+                                                        tavalue=sexprToTerm val }
 listToTerm ((SymbolLiteral "$"):arg:[]) = TDeref { tag=(), toperand=(sexprToTerm arg) }
 listToTerm ((SymbolLiteral "$"):arr:idx:idxs) = TSubscript { tag=(), ttarget=(sexprToTerm arr), tsubscripts=((sexprToTerm idx):(map sexprToTerm idxs)) }
 listToTerm x@((SymbolLiteral "$"):_) = error $ "Malformed dereference " ++ (show x)
@@ -173,6 +180,10 @@ listToTerm ((SymbolLiteral "typedef"):(SymbolLiteral name):from:[]) = TTypedef {
 listToTerm x@((SymbolLiteral "typedef"):_) = error $ "Malformed typedef " ++ (show x)
 listToTerm (func:args) = TFuncall { tag=(), tfun=(sexprToTerm func), targs=(map sexprToTerm args) }
 listToTerm [] = error "Empty function call"
+
+processStructField :: SExpr -> (String, DeclType)
+processStructField (List ((StringLiteral name):decltype:[])) = (name, sexprToType decltype)
+processStructField x = error $ "Malformed structure field " ++ (show x)
 
 processLambda :: [SExpr] -> Term ()
 processLambda (rettype:(List args):body) = TLambda { tag=(),
