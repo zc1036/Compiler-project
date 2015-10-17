@@ -24,6 +24,7 @@ data SExpr = IntLiteral Integer
 -- known to the compiler.
 
 data DeclType = DeclPtr DeclType
+              | DeclArray Int DeclType
               | DeclMutable DeclType
               | DeclFunction DeclType [DeclType] -- rettype [args]
               | TypeName String
@@ -47,9 +48,14 @@ data Term a = TName          { tag :: a, tsrepr :: String }
             | TFuncall       { tag :: a, tfun :: Term a, targs :: [Term a] }
             | TDef           { tag :: a, tname :: String, ttype :: DeclType, tvalue :: Maybe (Term a) }
             | TLambda        { tag :: a, rettype :: DeclType, tbindings :: [LambdaArg], tbody :: [Term a] }
-            | TStruct        { tag :: a, tfields :: [(String, DeclType)], parent :: Term a }
+            | TStruct        { tag :: a, tfields :: [(String, DeclType)], tname :: String }
             | TAssign        { tag :: a, vars :: [Term a], value :: Term a }
             | TReturn        { tag :: a, tvalue :: Maybe (Term a) }
+            | TDeref         { tag :: a, toperand :: Term a }
+            | TAddr          { tag :: a, toperand :: Term a }
+            | TSubscript     { tag :: a, ttarget :: Term a, tsubscripts :: [Term a] }
+            | TMemberAccess  { tag :: a, ttarget :: Term a, tmembers :: [Term a] }
+            | TTypedef       { tag :: a, ttypedefFrom :: DeclType, ttypedefTo :: String }
               deriving (Show)
 
 -- Parser functions
@@ -154,9 +160,19 @@ listToTerm ((SymbolLiteral "def"):_) = error "Invalid DEF syntax"
 listToTerm ((SymbolLiteral "lambda"):rest) = processLambda rest
 listToTerm ((SymbolLiteral "return"):value:[]) = TReturn { tag=(), tvalue=Just (sexprToTerm value) }
 listToTerm ((SymbolLiteral "return"):[]) = TReturn { tag=(), tvalue=Nothing }
-listToTerm ((SymbolLiteral "="):rest) = TAssign { tag=(),
-                                                  vars=(map sexprToTerm $ init rest),
-                                                  value=(sexprToTerm $ last rest) }
+listToTerm ((SymbolLiteral "struct"):(SymbolLiteral name):fields) = TStruct { tag=(), tname=name, tfields=processStructFields fields }
+listToTerm ((SymbolLiteral "="):rest)
+    | length rest >= 2 = TAssign { tag=(),
+                                   vars=(map sexprToTerm $ init rest),
+                                   value=(sexprToTerm $ last rest) }
+    | otherwise = error "Assignment expects at least two operands"
+listToTerm ((SymbolLiteral "$"):arg:[]) = TDeref { tag=(), toperand=(sexprToTerm arg) }
+listToTerm ((SymbolLiteral "$"):arr:idx:idxs) = TSubscript { tag=(), ttarget=(sexprToTerm arr), tsubscripts=((sexprToTerm idx):(map sexprToTerm idxs)) }
+listToTerm x@((SymbolLiteral "$"):_) = error $ "Malformed dereference " ++ (show x)
+listToTerm ((SymbolLiteral "@"):arg:[]) = TAddr { tag=(), toperand=(sexprToTerm arg) }
+listToTerm x@((SymbolLiteral "@"):_) = error $ "Malformed address-of operand " ++ (show x)
+listToTerm ((SymbolLiteral "typedef"):(SymbolLiteral name):from:[]) = TTypedef { tag=(), ttypedefFrom=(sexprToType from), ttypedefTo=name }
+listToTerm x@((SymbolLiteral "typedef"):_) = error $ "Malformed typedef " ++ (show x)
 listToTerm (func:args) = TFuncall { tag=(), tfun=(sexprToTerm func), targs=(map sexprToTerm args) }
 listToTerm [] = error "Empty function call"
 
@@ -172,8 +188,9 @@ processLambdaArg (List ((SymbolLiteral name):argtype:[])) = LambdaArg name (sexp
 processLambdaArg x = error $ "Malformed lambda parameter: " ++ (show x)
 
 sexprToType :: SExpr -> DeclType
-sexprToType (List ((SymbolLiteral "*"):rest:[])) = DeclPtr (sexprToType rest)
+sexprToType (List ((SymbolLiteral "ptr"):rest:[])) = DeclPtr (sexprToType rest)
 sexprToType (List ((SymbolLiteral "mut"):rest:[])) = DeclMutable (sexprToType rest)
+sexprToType (List ((IntLiteral size):rest:[])) = DeclArray size (sexprToType rest)
 sexprToType (List (rettype:args)) = DeclFunction (sexprToType rettype) (map sexprToType args)
 sexprToType (SymbolLiteral s) = TypeName s
 sexprToType x = error $ "Invalid type " ++ (show x)

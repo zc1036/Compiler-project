@@ -7,7 +7,7 @@ import Utils (makeMap, recsearch)
 import Parser
 import Data.Maybe
 import qualified Data.Map.Lazy as Map
-import Data.List (intercalate, mapAccumL)
+import Data.List (intercalate, mapAccumL, elemIndex)
 
 data TypeInfo = BuiltinType { typeid :: Int, name :: String }
               | Struct { typeid :: Int, fields :: [(String, DeclType)], parent :: TypeInfo, name :: String }
@@ -22,18 +22,29 @@ instance Eq TypeInfo where
 -- After a DeclType has been looked up and verified, it becomes a
 -- QualifiedTypeInfo
 data QualifiedTypeInfo = Ptr QualifiedTypeInfo
+                       | Array Int QualifiedTypeInfo
                        | Mutable QualifiedTypeInfo
                        | Function QualifiedTypeInfo [QualifiedTypeInfo]
                        | Unqualified TypeInfo
 
+functionPtrArgs :: QualifiedTypeInfo -> [QualifiedTypeInfo]
+functionPtrArgs (Ptr (Function _ argtypes)) = argtypes
+functionPtrArgs x = error $ (show x) ++ " is not a function pointer and so isn't callable"
+
+functionPtrRetType :: QualifiedTypeInfo -> QualifiedTypeInfo
+functionPtrRetType (Ptr (Function rettype _)) = rettype
+functionPtrRetType x = error $ (show x) ++ " is not a function pointer and so isn't callable"
+                                    
 instance Show QualifiedTypeInfo where
     show (Ptr x) = (show x) ++ "*"
+    show (Array size x) = (show x) ++ "[" ++ (show size) ++ "]"
     show (Mutable x) = "mut " ++ (show x)
     show (Function rettype args) = "(" ++ (intercalate " " (map show args)) ++ " -> " ++ (show rettype) ++ ")"
     show (Unqualified x) = show x
 
 instance Eq QualifiedTypeInfo where
     (==) (Ptr x) (Ptr y) = x == y
+    (==) (Array size1 x1) (Array size2 x2) = size1 == size2 && x1 == x2
     (==) (Mutable x) (Mutable y) = x == y
     (==) (Function rettype1 args1) (Function rettype2 args2) =
         rettype1 == rettype2 && (length args1) == (length args2) && (and (zipWith (==) args1 args2))
@@ -41,8 +52,8 @@ instance Eq QualifiedTypeInfo where
 
 -- A "Named" is a thing that is stored in the symbol table.
 data Named = Variable QualifiedTypeInfo
-          | Type TypeInfo
-            deriving (Show)
+           | Type QualifiedTypeInfo
+             deriving (Show)
 
 type TypedTerm = Term QualifiedTypeInfo
 type SymbolTable = Map.Map String (Named, Int)
@@ -57,43 +68,53 @@ globalScope = 0
 
 intTypeID = 0
 floatTypeID = 1
-stringTypeID = 2
+charTypeID = 2
 voidTypeID = 3
 startUserDefinedTypeIDs = voidTypeID + 1
 
-intType = BuiltinType { typeid=intTypeID, name="int" }
-floatType = BuiltinType { typeid=floatTypeID, name="float" }
-stringType = BuiltinType { typeid=stringTypeID, name="string" }
-voidType = BuiltinType { typeid=voidTypeID, name="void" }
+intType = Unqualified (BuiltinType { typeid=intTypeID, name="int" })
+floatType = Unqualified (BuiltinType { typeid=floatTypeID, name="float" })
+charType = Unqualified (BuiltinType { typeid=charTypeID, name="char" })
+voidType = Unqualified (BuiltinType { typeid=voidTypeID, name="void" })
+stringType = Ptr charType
 
 defaultSymTable :: SymbolTable
 defaultSymTable = makeMap [("int", (Type intType, globalScope)),
                            ("float", (Type floatType, globalScope)),
-                           ("string", (Type stringType, globalScope)),
-                           ("void", (Type voidType, globalScope))]
+                           ("char", (Type charType, globalScope)),
+                           ("void", (Type voidType, globalScope)),
+                           ("string", (Type charTtpe, globalScope))]
+
+isLvalue :: Term a -> Bool
+isLvalue (TName { }) = True
+isLvalue (TDeref { }) = True
+isLvalue (TSubscript { }) = True
+isLvalue (TMemberAccess { }) = True
+isLvalue _ = False
 
 decltypeToTypeInfo :: AnalyzerState -> DeclType -> QualifiedTypeInfo
 decltypeToTypeInfo s (DeclPtr t) = Ptr (decltypeToTypeInfo s t)
+decltypeToTypeInfo s (DeclArray size t) = Array size (decltypeToTypeInfo t)
 decltypeToTypeInfo s (DeclMutable (DeclMutable _)) = error "Repeated mutability specifier in type"
 decltypeToTypeInfo s (DeclMutable t) = Mutable (decltypeToTypeInfo s t)
 decltypeToTypeInfo s (DeclFunction rettype args) = Function (decltypeToTypeInfo s rettype) (map (decltypeToTypeInfo s) args)
 decltypeToTypeInfo (AnalyzerState { symbols }) (TypeName name) =
     case Map.lookup name symbols of
-      Just (Type t, _) -> Unqualified t
+      Just (Type t, _) -> t
       _ -> error $ "Undefined typename '" ++ name ++ "'"
 
 -- True if the first argument is compatible with the first (i.e. the
 -- second can be assigned to the first)
 typesAreCompatible :: QualifiedTypeInfo -> QualifiedTypeInfo -> Bool
-typesAreCompatible (Ptr x) (Unqualified (BuiltinType { typeid })) = typeid == intTypeID
-typesAreCompatible x y = typesAreCompatible' x y
+typesAreCompatible (Mutable x) y = typesAreCompatible' x y
+typesAreCompatible _ _ = False
 
 typesAreCompatible' :: QualifiedTypeInfo -> QualifiedTypeInfo -> Bool
+typesAreCompatible' (Array size1 x) (Array size2 y) = size1 == size2 && typesAreCompatible' x y
 typesAreCompatible' (Ptr x) (Ptr y) = typesAreCompatible' x y
 typesAreCompatible' (Mutable x) (Mutable y) = typesAreCompatible' x y
+typesAreCompatible' x (Mutable y) = typesAreCompatible' x y
 typesAreCompatible' (Unqualified x) (Unqualified y) = x == y
-typesAreCompatible' (Unqualified x) (Mutable (Unqualified y)) = x == y
-typesAreCompatible' (Ptr x) (Mutable (Ptr y)) = typesAreCompatible' x y -- A mutable pointer is convertible to an immutable pointer
 typesAreCompatible' (Function rettype1 args1) (Function rettype2 args2) =
     -- Function types have to match exactly; check ret types, arg
     -- counts, and then check each arg type and ensure they match exactly.
@@ -106,7 +127,7 @@ analyze' state@(AnalyzerState { symbols, scopeLevel, nextTypeID }) (TDef { tname
     | redeclaration = error $ tname ++ " redefined"
     | typesAreIncompatible = error $ "Types " ++ (show typeOfVar) ++ " and " ++ (show (fromJust typeOfValue)) ++ " are incompatible "
     | otherwise = (state { symbols=(Map.insert tname (Variable typeOfVar, scopeLevel) symbols), nextTypeID=newNextTypeID },
-                   TDef { tag=(Unqualified voidType), tname=tname, ttype=ttype, tvalue=analyzedValue })
+                   TDef { tag=voidType, tname=tname, ttype=ttype, tvalue=analyzedValue })
     where redeclaration = case Map.lookup tname symbols of
                             Just (_, scope) -> (scope == scopeLevel)
                             _ -> False
@@ -119,8 +140,10 @@ analyze' state@(AnalyzerState { symbols, scopeLevel, nextTypeID }) (TDef { tname
                           Just declvalue -> Just (tag declvalue)
                           Nothing        -> Nothing
           typesAreIncompatible = case typeOfValue of
-                                   Just typeOfValue' -> not (typesAreCompatible typeOfVar typeOfValue')
+                                   Just typeOfValue' -> not (typesAreCompatible (makeMutable typeOfVar) typeOfValue')
                                    Nothing           -> False
+          makeMutable m@(Mutable x) = m
+          makeMutable x = (Mutable x)
 
 analyze' state@(AnalyzerState { symbols }) (TName { tsrepr }) =
     case Map.lookup tsrepr symbols of
@@ -143,27 +166,56 @@ analyze' state@(AnalyzerState { scopeLevel }) (TLambda { rettype, tbindings, tbo
     where isLambda (TLambda { }) = True
           isLambda _             = False
           returnIsBad good (TReturn { tvalue=(Just val) }) = not $ typesAreCompatible good (tag val)
-          returnIsBad good (TReturn { tvalue=Nothing }) = not $ typesAreCompatible good (Unqualified voidType)
+          returnIsBad good (TReturn { tvalue=Nothing }) = good /= voidType
           returnIsBad _ _ = False
 
 analyze' state (TReturn { tvalue=(Just val) }) =
     let (substate, analyzedValue) = analyze' state val
     in (state { nextTypeID=(nextTypeID substate) },
-        TReturn { tag=Unqualified voidType, tvalue=Just analyzedValue })
+        TReturn { tag=voidType, tvalue=Just analyzedValue })
+
+analyze' state (TFuncall { tfun, targs }) =
+    let (substate, analyzedFunName) = analyze' state tfun
+        (substate', analyzedArgs) = analyzeWithState' substate targs
+        paramTypes = functionPtrArgs (tag analyzedFunName)
+        argTypes = (map tag analyzedArgs) in
+    if length argTypes /= length paramTypes then
+        error $ "Wrong number of arguments to function " ++ (show tfun) ++ ": expecting " ++ (show (length paramTypes)) ++ ", got " ++ (show (length argTypes))
+    else
+        case elemIndex False (zipWith typesAreCompatible argTypes paramTypes) of
+          Just idx -> error $ "Function argument " ++ (show (targs !! idx)) ++ ", which is of type " ++ (show (tag (analyzedArgs !! idx))) ++ ", is incompatible with type of parameter " ++ (show (idx + 1)) ++ " of " ++ (show tfun) ++ ", " ++ (show ((functionPtrArgs (tag analyzedFunName)) !! idx))
+          Nothing  -> (substate', TFuncall { tag=(functionPtrRetType (tag analyzedFunName)),
+                                             tfun=analyzedFunName,
+                                             targs=analyzedArgs })
+
+--analyze' state (TAssign { vars, value }) =
+--    let (substate, analyzedVars) = analyzeWithState' state vars
+--        (substate', analyzedValue) = analyze' substate value in
+
+analyze' state (TStruct { tfields, tname }) =
+    
+
+analyze' state@(AnalyzerState { symbols, scopeLevel }) (TTypedef { ttypedefFrom, ttypedefTo }) =
+    let newType = decltypeToTypeInfo state ttypedefFrom in
+    (state { symbols=(Map.insert ttypedefTo (Type newType, scopeLevel) symbols) },
+     TTypedef { tag=voidType, ttypedefFrom=ttypedefFrom, ttypedefTo=ttypedefTo })
 
 analyze' state (TReturn { tvalue=Nothing }) =
-    (state, TReturn { tag=Unqualified voidType, tvalue=Nothing })
+    (state, TReturn { tag=voidType, tvalue=Nothing })
 
-analyze' state (TIntLiteral { tirepr }) = (state, TIntLiteral { tag=(Unqualified intType), tirepr=tirepr })
-analyze' state (TFloatLiteral { tfrepr }) = (state, TFloatLiteral { tag=(Unqualified floatType), tfrepr=tfrepr })
-analyze' state (TStringLiteral { tsrepr }) = (state, TStringLiteral { tag=(Unqualified stringType), tsrepr=tsrepr })
+analyze' state (TIntLiteral { tirepr }) = (state, TIntLiteral { tag=intType, tirepr=tirepr })
+analyze' state (TFloatLiteral { tfrepr }) = (state, TFloatLiteral { tag=floatType, tfrepr=tfrepr })
+analyze' state (TStringLiteral { tsrepr }) = (state, TStringLiteral { tag=stringType, tsrepr=tsrepr })
 
 analyze' _ x = error $ "Attempted to analyze unrecognized form " ++ (show x)
 
 bindLambdaList :: AnalyzerState -> [LambdaArg] -> AnalyzerState
 bindLambdaList state [] = state
 bindLambdaList state@(AnalyzerState { symbols }) (arg:args) =
-    bindLambdaList (state { symbols=(Map.insert (lambdaArgName arg) (Variable (decltypeToTypeInfo state (lambdaArgType arg)), (scopeLevel state)) symbols) }) args
+    bindLambdaList (state { symbols=(Map.insert
+                                     (lambdaArgName arg)
+                                     (Variable (decltypeToTypeInfo state (lambdaArgType arg)), (scopeLevel state))
+                                     symbols) }) args
 
 find1 :: (Term a -> Bool) -> (Term a -> Bool) -> Term a -> Maybe (Term a)
 find1 _ f t@(TName { }) = if f t then Just t else Nothing
