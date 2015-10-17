@@ -49,7 +49,7 @@ data Term a = TName          { tag :: a, tsrepr :: String }
             | TDef           { tag :: a, tname :: String, ttype :: DeclType, tvalue :: Maybe (Term a) }
             | TLambda        { tag :: a, rettype :: DeclType, tbindings :: [LambdaArg], tbody :: [Term a] }
             | TStruct        { tag :: a, tfields :: [(String, DeclType)], tname :: String }
-            | TAssign        { tag :: a, vars :: [Term a], value :: Term a }
+            | TAssign        { tag :: a, tavar :: Term a, tavalue :: Term a }
             | TReturn        { tag :: a, tvalue :: Maybe (Term a) }
             | TDeref         { tag :: a, toperand :: Term a }
             | TAddr          { tag :: a, toperand :: Term a }
@@ -161,11 +161,9 @@ listToTerm ((SymbolLiteral "lambda"):rest) = processLambda rest
 listToTerm ((SymbolLiteral "return"):value:[]) = TReturn { tag=(), tvalue=Just (sexprToTerm value) }
 listToTerm ((SymbolLiteral "return"):[]) = TReturn { tag=(), tvalue=Nothing }
 listToTerm ((SymbolLiteral "struct"):(SymbolLiteral name):fields) = TStruct { tag=(), tname=name, tfields=processStructFields fields }
-listToTerm ((SymbolLiteral "="):rest)
-    | length rest >= 2 = TAssign { tag=(),
-                                   vars=(map sexprToTerm $ init rest),
-                                   value=(sexprToTerm $ last rest) }
-    | otherwise = error "Assignment expects at least two operands"
+listToTerm ((SymbolLiteral "="):var:val:[]) = TAssign { tag=(),
+                                                        tavar=sexprToTerm var,
+                                                        tavalue=sexprToTerm value }
 listToTerm ((SymbolLiteral "$"):arg:[]) = TDeref { tag=(), toperand=(sexprToTerm arg) }
 listToTerm ((SymbolLiteral "$"):arr:idx:idxs) = TSubscript { tag=(), ttarget=(sexprToTerm arr), tsubscripts=((sexprToTerm idx):(map sexprToTerm idxs)) }
 listToTerm x@((SymbolLiteral "$"):_) = error $ "Malformed dereference " ++ (show x)
