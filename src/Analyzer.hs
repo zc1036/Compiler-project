@@ -7,7 +7,9 @@ import Utils (makeMap, recsearch)
 import Parser
 import Data.Maybe
 import qualified Data.Map.Lazy as Map
-import Data.List (intercalate, mapAccumL, elemIndex)
+import Data.List (intercalate, mapAccumL, elemIndex, lookup)
+import qualified Data.Set as Set
+import Text.Printf
 
 data TypeInfo = BuiltinType { typeid :: Int, name :: String }
               | Struct { typeid :: Int, fields :: [(String, QualifiedTypeInfo)], name :: String }
@@ -70,12 +72,14 @@ intTypeID = 0
 floatTypeID = 1
 charTypeID = 2
 voidTypeID = 3
-startUserDefinedTypeIDs = voidTypeID + 1
+nullTypeID = 4
+startUserDefinedTypeIDs = nullTypeID + 1
 
 intType = Unqualified (BuiltinType { typeid=intTypeID, name="int" })
 floatType = Unqualified (BuiltinType { typeid=floatTypeID, name="float" })
 charType = Unqualified (BuiltinType { typeid=charTypeID, name="char" })
 voidType = Unqualified (BuiltinType { typeid=voidTypeID, name="void" })
+nullType = Unqualified (BuiltinType { typeid=nullTypeID, name="null" })
 stringType = Ptr charType
 
 defaultSymTable :: SymbolTable
@@ -83,7 +87,8 @@ defaultSymTable = makeMap [("int", (Type intType, globalScope)),
                            ("float", (Type floatType, globalScope)),
                            ("char", (Type charType, globalScope)),
                            ("void", (Type voidType, globalScope)),
-                           ("string", (Type charType, globalScope))]
+                           ("string", (Type stringType, globalScope)),
+                           ("null", (Variable nullType, globalScope))]
 
 isLvalue :: Term a -> Bool
 isLvalue (TName { }) = True
@@ -104,9 +109,9 @@ decltypeToTypeInfo (AnalyzerState { symbols }) (TypeName name) =
       Just (Type t, _) -> t
       _ -> error $ "Undefined typename '" ++ name ++ "'"
 
--- True if the first argument is compatible with the first (i.e. an
--- object of the first type can be implicitly converted to an object
--- of the second)
+-- True iff the first argument is compatible with the first (i.e. a
+-- pointer to an object of the first type can be implicitly converted
+-- to a pointer to an object of the second)
 typesAreCompatible :: QualifiedTypeInfo -> QualifiedTypeInfo -> Bool
 typesAreCompatible (Ptr x) (Ptr y) = typesAreCompatible x y
 typesAreCompatible (Mutable x) (Mutable y) = typesAreCompatible x y
@@ -118,9 +123,28 @@ typesAreCompatible (Function rettype1 args1) (Function rettype2 args2) =
     (rettype1 == rettype2) && (length args1) == (length args2) && (and (zipWith (==) args1 args2))
 typesAreCompatible _ _ = False
 
+-- True iff the types fit special conversion rules (i.e. int to pointer, etc)
+typesAreConvertible :: QualifiedTypeInfo -> QualifiedTypeInfo -> Bool
+typesAreConvertible (Ptr _) (Unqualified (BuiltinType { typeid })) = typeid == nullTypeID
+typesAreConvertible _ _ = False
+
+isInitializeableBy :: QualifiedTypeInfo -> QualifiedTypeInfo -> Bool
+isInitializeableBy x y = (typesAreCompatible (removeMutability x) y) || (typesAreConvertible (removeMutability x) (removeMutability y))
+
 isMutable :: QualifiedTypeInfo -> Bool
 isMutable (Mutable _) = True
 isMutable _ = False
+
+removeMutability :: QualifiedTypeInfo -> QualifiedTypeInfo
+removeMutability (Mutable x) = x
+removeMutability x = x
+
+isIntegral :: QualifiedTypeInfo -> Bool
+isIntegral (Unqualified (BuiltinType { typeid }))
+    | typeid == intTypeID = True
+    | typeid == charTypeID = True
+    | otherwise = False
+isIntegral _ = False
 
 isRedeclaration :: String -> SymbolTable -> Int -> Bool
 isRedeclaration name symbols scopeLevel = case Map.lookup name symbols of
@@ -131,7 +155,7 @@ analyze' :: AnalyzerState -> Term () -> (AnalyzerState, TypedTerm)
 
 analyze' state@(AnalyzerState { symbols, scopeLevel, nextTypeID }) (TDef { tname, ttype, tvalue })
     | (isRedeclaration tname symbols scopeLevel) = error $ tname ++ " redefined"
-    | typesAreIncompatible = error $ "Types " ++ (show typeOfVar) ++ " and " ++ (show (fromJust typeOfValue)) ++ " are incompatible "
+    | initializerTypeError = error $ "Types " ++ (show typeOfVar) ++ " and " ++ (show (fromJust typeOfValue)) ++ " are incompatible "
     | otherwise = (state { symbols=Map.insert tname (Variable typeOfVar, scopeLevel) symbols, nextTypeID=newNextTypeID },
                    TDef { tag=voidType, tname=tname, ttype=ttype, tvalue=analyzedValue })
     where (newNextTypeID, analyzedValue) = case tvalue of
@@ -142,8 +166,8 @@ analyze' state@(AnalyzerState { symbols, scopeLevel, nextTypeID }) (TDef { tname
           typeOfValue = case analyzedValue of
                           Just declvalue -> Just (tag declvalue)
                           Nothing        -> Nothing
-          typesAreIncompatible = case typeOfValue of
-                                   Just typeOfValue' -> not (typesAreCompatible typeOfVar typeOfValue')
+          initializerTypeError = case typeOfValue of
+                                   Just typeOfValue' -> not (isInitializeableBy typeOfVar typeOfValue')
                                    Nothing           -> False
 
 analyze' state@(AnalyzerState { symbols }) (TName { tsrepr }) =
@@ -183,11 +207,33 @@ analyze' state (TFuncall { tfun, targs }) =
     if length argTypes /= length paramTypes then
         error $ "Wrong number of arguments to function " ++ (show tfun) ++ ": expecting " ++ (show (length paramTypes)) ++ ", got " ++ (show (length argTypes))
     else
-        case elemIndex False (zipWith typesAreCompatible argTypes paramTypes) of
-          Just idx -> error $ "Function argument " ++ (show (targs !! idx)) ++ ", which is of type " ++ (show (tag (analyzedArgs !! idx))) ++ ", is incompatible with type of parameter " ++ (show (idx + 1)) ++ " of " ++ (show tfun) ++ ", " ++ (show ((functionPtrArgs (tag analyzedFunName)) !! idx))
+        case elemIndex False (zipWith isInitializeableBy paramTypes argTypes) of
+          Just idx -> error $ printf "Function argument %s, which is of type %s, is incompatible with type of parameter %d of %s, %s" (show (targs !! idx)) (show (tag (analyzedArgs !! idx))) (show (idx + 1)) (show tfun) (show ((functionPtrArgs (tag analyzedFunName)) !! idx))
           Nothing  -> (substate', TFuncall { tag=functionPtrRetType (tag analyzedFunName),
                                              tfun=analyzedFunName,
                                              targs=analyzedArgs })
+
+analyze' state@(AnalyzerState { symbols }) (TStructLiteral { tstructname, tfieldvalues }) =
+    case Map.lookup tstructname symbols of
+      Just ((Type littype@(Unqualified (Struct { fields }))), _) ->
+          let (newstate, analyzedFieldValues) = analyzeFieldValues state fields tfieldvalues in
+          (newstate, TStructLiteral { tag=littype, tstructname=tstructname, tfieldvalues=analyzedFieldValues })
+      Nothing -> error $ "Name '" ++ tstructname ++ "' is undeclared"
+      _ -> error $ tstructname ++ " in structure literal is not a structure"
+    where analyzeFieldValues state fields tfieldvalues = let ((finalstate, _), anavalues) = mapAccumL (analyzeFieldValues' fields) (state, Set.empty) tfieldvalues in
+                                                         (finalstate, anavalues)
+          -- the analyzeFieldValues' function has to check that the
+          -- fields of the struct are all initialized exactly once and
+          -- that they're initialized with the right type.
+          analyzeFieldValues' structFields (state, fieldsAssigned) (fieldname, fieldinit)
+              | Set.member fieldname fieldsAssigned = error $ "Member " ++ fieldname ++ " is already initialized in " ++ tstructname ++ " structure literal"
+              | otherwise = case lookup fieldname structFields of
+                              Just declaredFieldType -> let (newstate, analyzedInitializer) = analyze' state fieldinit in
+                                                        if isInitializeableBy declaredFieldType (tag analyzedInitializer) then
+                                                            ((newstate, (Set.insert fieldname fieldsAssigned)), (fieldname, analyzedInitializer))
+                                                        else
+                                                            error $ printf "Value of type %s cannot be used to initialize field %s of type %s in struct %s (in structure literal)" (show (tag analyzedInitializer)) fieldname (show declaredFieldType) tstructname
+                              _ -> error $ "Structure " ++ tstructname ++ " has no member named " ++ fieldname ++ " (in structure literal)"
 
 analyze' state (TAssign { tavar, tavalue }) =
     let (substate, analyzedVar) = analyze' state tavar
@@ -214,19 +260,32 @@ analyze' state (TReturn { tvalue=Nothing }) = (state, TReturn { tag=voidType, tv
 
 analyze' state (TDeref { toperand }) =
     let (newstate, analyzedOp) = analyze' state toperand in
-    (newstate, TDeref { tag=derefType, toperand=analyzedOp })
+    (newstate, TDeref { tag=derefType (tag analyzedOp), toperand=analyzedOp })
     where derefType (Mutable (Ptr x)) = x
           derefType (Ptr x) = x
           derefType x = error $ "Attempted to dereference non-pointer type " ++ (show x)
 
 analyze' state (TAddr { toperand }) =
     let (newstate, analyzedOp) = analyze' state toperand in
-    (newstate, TDeref { tag=addrType, toperand=analyzedOp })
-    where addrType = 
+    (newstate, TDeref { tag=Ptr (tag analyzedOp), toperand=analyzedOp })
 
 analyze' state (TIntLiteral { tirepr }) = (state, TIntLiteral { tag=intType, tirepr=tirepr })
 analyze' state (TFloatLiteral { tfrepr }) = (state, TFloatLiteral { tag=floatType, tfrepr=tfrepr })
 analyze' state (TStringLiteral { tsrepr }) = (state, TStringLiteral { tag=stringType, tsrepr=tsrepr })
+
+analyze' state subscript@(TSubscript { ttarget, tsubscripts }) =
+    case validDereferencePattern (tag analyzedTarget) (map tag analyzedSubscripts) of
+      Nothing           -> error $ "Invalid dereference in " ++ (show subscript)
+      Just dereffedType -> (newstate', TSubscript { tag=dereffedType,
+                                                    ttarget=analyzedTarget,
+                                                    tsubscripts=analyzedSubscripts })
+    where (newstate, analyzedTarget) = analyze' state ttarget
+          (newstate', analyzedSubscripts) = analyzeWithState' newstate tsubscripts
+          validDereferencePattern (Mutable x) idxs = validDereferencePattern x idxs
+          validDereferencePattern (Ptr target) (idx:idxs) = if not (isIntegral idx) then Nothing else validDereferencePattern target idxs
+          validDereferencePattern (Array _ target) (idx:idxs) = if not (isIntegral idx) then Nothing else validDereferencePattern target idxs
+          validDereferencePattern t [] = Just t
+          validDereferencePattern _ _ = Nothing
 
 analyze' _ x = error $ "Attempted to analyze unrecognized form " ++ (show x)
 

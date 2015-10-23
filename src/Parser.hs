@@ -7,6 +7,7 @@ import Text.ParserCombinators.Parsec
 import System.Environment
 import Control.Monad
 import Data.Maybe
+import Text.Regex (splitRegex, mkRegex)
 import Data.List (intercalate)
 
 -- AST types
@@ -16,11 +17,12 @@ data SExpr = IntLiteral Integer
            | SymbolLiteral String
            | StringLiteral String
            | List [SExpr]
+           | StructLiteral [SExpr]
 
 instance Show SExpr where
     show (IntLiteral x) = (show x)
     show (FloatLiteral x) = (show x)
-    show (SymbolLiteral (_:rest)) = init rest
+    show (SymbolLiteral x) = x
     show (StringLiteral x) = show x
     show (List x) = "(" ++ (intercalate " " (map show x)) ++ ")"
 
@@ -61,14 +63,15 @@ data Term a = TName          { tag :: a, tsrepr :: String }
             | TDeref         { tag :: a, toperand :: Term a }
             | TAddr          { tag :: a, toperand :: Term a }
             | TSubscript     { tag :: a, ttarget :: Term a, tsubscripts :: [Term a] }
-            | TMemberAccess  { tag :: a, ttarget :: Term a, tmembers :: [Term a] }
+            | TMemberAccess  { tag :: a, ttarget :: Term a, tmember :: String }
             | TTypedef       { tag :: a, ttypedefFrom :: DeclType, ttypedefTo :: String }
+            | TStructLiteral { tag :: a, tstructname :: String, tfieldvalues :: [(String, Term a)] }
               deriving (Show)
 
 -- Parser functions
 
 symbolChars :: String
-symbolChars = "!#$%&|*+-/:<=>?@^_~" ++ ['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9']
+symbolChars = ".!#$%&|*+-/:<=>?@^_~" ++ ['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9']
 
 lispsymbol :: Parser SExpr
 lispsymbol = liftM SymbolLiteral (many1 (oneOf symbolChars))
@@ -109,6 +112,16 @@ list = do
   char ')'
   return (List body)
 
+structLiteral :: Parser SExpr
+structLiteral = do
+  whitespace
+  char '{'
+  whitespace
+  body <- try listBody <|> listEnd
+  whitespace
+  char '}'
+  return (StructLiteral body)
+
 escapedChar :: Parser Char
 escapedChar = (char '\\') >> (oneOf "rtn\\\"")
 
@@ -132,6 +145,7 @@ expr = number
        <|> stringlit
        <|> lispsymbol
        <|> list
+       <|> structLiteral
 
 whitespace :: Parser ()
 whitespace = skipMany space
@@ -151,8 +165,18 @@ readAll = do
 sexprToTerm :: SExpr -> Term ()
 sexprToTerm (IntLiteral i) = TIntLiteral { tag=(), tirepr=i }
 sexprToTerm (FloatLiteral f) = TFloatLiteral { tag=(), tfrepr=f }
-sexprToTerm (SymbolLiteral s) = TName { tag=(), tsrepr=s }
+sexprToTerm (SymbolLiteral s) =
+    let (name:names) = splitRegex (mkRegex "\\.") s in
+    processMemberAccess (TName { tag=(), tsrepr=checkName name }) names
+    where processMemberAccess lhs (rhs:rhses) = processMemberAccess (TMemberAccess { tag=(), ttarget=lhs, tmember=checkName rhs }) rhses
+          processMemberAccess lhs [] = lhs
+          checkName "" = error $ "Invalid member access " ++ s
+          checkName s = s
 sexprToTerm (StringLiteral s) = TStringLiteral { tag=(), tsrepr=s }
+sexprToTerm (StructLiteral ((SymbolLiteral name):body)) = TStructLiteral { tag=(), tstructname=name, tfieldvalues=map processStructLiteral body }
+    where processStructLiteral (List ((SymbolLiteral fieldname):initializer:[])) = (fieldname, sexprToTerm initializer)
+          processStructLiteral x = error $ "Malformed member initialization in structure literal: " ++ (show x)
+sexprToTerm (StructLiteral x) = error $ "Malformed structure literal " ++ (show x)
 sexprToTerm (List l) = listToTerm l
 
 listToTerm :: [SExpr] -> Term ()
@@ -182,7 +206,7 @@ listToTerm (func:args) = TFuncall { tag=(), tfun=(sexprToTerm func), targs=(map 
 listToTerm [] = error "Empty function call"
 
 processStructField :: SExpr -> (String, DeclType)
-processStructField (List ((StringLiteral name):decltype:[])) = (name, sexprToType decltype)
+processStructField (List ((SymbolLiteral name):decltype:[])) = (name, sexprToType decltype)
 processStructField x = error $ "Malformed structure field " ++ (show x)
 
 processLambda :: [SExpr] -> Term ()
