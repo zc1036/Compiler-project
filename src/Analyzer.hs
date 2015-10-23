@@ -38,7 +38,7 @@ functionPtrRetType (Ptr (Function rettype _)) = rettype
 functionPtrRetType x = error $ (show x) ++ " is not a function pointer and so isn't callable"
                                     
 instance Show QualifiedTypeInfo where
-    show (Ptr x) = (show x) ++ "*"
+    show (Ptr x) = "ptr " ++ (show x)
     show (Array size x) = (show x) ++ "[" ++ (show size) ++ "]"
     show (Mutable x) = "mut " ++ (show x)
     show (Function rettype args) = "(" ++ (intercalate " " (map show args)) ++ " -> " ++ (show rettype) ++ ")"
@@ -64,6 +64,9 @@ data AnalyzerState = AnalyzerState { symbols :: SymbolTable, -- A map of declara
                                      scopeLevel :: Int,      -- the current scope level starting from globalScope ascending
                                      nextTypeID :: Int }
                      deriving (Show)
+
+passup :: AnalyzerState -> AnalyzerState -> AnalyzerState
+passup x y = x { nextTypeID=nextTypeID y }
 
 globalScope :: Int
 globalScope = 0
@@ -156,12 +159,12 @@ analyze' :: AnalyzerState -> Term () -> (AnalyzerState, TypedTerm)
 analyze' state@(AnalyzerState { symbols, scopeLevel, nextTypeID }) (TDef { tname, ttype, tvalue })
     | (isRedeclaration tname symbols scopeLevel) = error $ tname ++ " redefined"
     | initializerTypeError = error $ "Types " ++ (show typeOfVar) ++ " and " ++ (show (fromJust typeOfValue)) ++ " are incompatible "
-    | otherwise = (state { symbols=Map.insert tname (Variable typeOfVar, scopeLevel) symbols, nextTypeID=newNextTypeID },
+    | otherwise = (passup (state { symbols=Map.insert tname (Variable typeOfVar, scopeLevel) symbols }) newstate,
                    TDef { tag=voidType, tname=tname, ttype=ttype, tvalue=analyzedValue })
-    where (newNextTypeID, analyzedValue) = case tvalue of
-                                             Just declvalue -> let (substate, analyzed) = analyze' state declvalue
-                                                               in ((Analyzer.nextTypeID substate), Just analyzed)
-                                             Nothing        -> (nextTypeID, Nothing)
+    where (newstate, analyzedValue) = case tvalue of
+                                        Just declvalue -> let (substate, analyzed) = analyze' state declvalue
+                                                          in (substate, Just analyzed)
+                                        Nothing        -> (state, Nothing)
           typeOfVar = (decltypeToTypeInfo state ttype)
           typeOfValue = case analyzedValue of
                           Just declvalue -> Just (tag declvalue)
@@ -186,7 +189,7 @@ analyze' state@(AnalyzerState { scopeLevel }) (TLambda { rettype, tbindings, tbo
     in case wronglyTypedReturnStatement of
          Just (TReturn { tvalue=Nothing }) -> error $ "Tried to return nothing from a function returning " ++ (show rettypeinfo)
          Just (TReturn { tvalue=Just val }) -> error $ "Tried to return a " ++ (show (tag val)) ++ " from a function returning " ++ (show rettypeinfo)
-         Nothing  -> (state { nextTypeID=nextTypeID substate },
+         Nothing  -> (passup state substate,
                       TLambda { tag=lambdaType, rettype=rettype, tbindings=tbindings, tbody=analyzedBody })
     where isLambda (TLambda { }) = True
           isLambda _             = False
@@ -196,7 +199,7 @@ analyze' state@(AnalyzerState { scopeLevel }) (TLambda { rettype, tbindings, tbo
 
 analyze' state (TReturn { tvalue=Just val }) =
     let (substate, analyzedValue) = analyze' state val
-    in (state { nextTypeID=nextTypeID substate },
+    in (passup state substate,
         TReturn { tag=voidType, tvalue=Just analyzedValue })
 
 analyze' state (TFuncall { tfun, targs }) =
@@ -209,15 +212,16 @@ analyze' state (TFuncall { tfun, targs }) =
     else
         case elemIndex False (zipWith isInitializeableBy paramTypes argTypes) of
           Just idx -> error $ printf "Function argument %s, which is of type %s, is incompatible with type of parameter %d of %s, %s" (show (targs !! idx)) (show (tag (analyzedArgs !! idx))) (show (idx + 1)) (show tfun) (show ((functionPtrArgs (tag analyzedFunName)) !! idx))
-          Nothing  -> (substate', TFuncall { tag=functionPtrRetType (tag analyzedFunName),
-                                             tfun=analyzedFunName,
-                                             targs=analyzedArgs })
+          Nothing  -> (passup state substate',
+                       TFuncall { tag=functionPtrRetType (tag analyzedFunName),
+                                  tfun=analyzedFunName,
+                                  targs=analyzedArgs })
 
 analyze' state@(AnalyzerState { symbols }) (TStructLiteral { tstructname, tfieldvalues }) =
     case Map.lookup tstructname symbols of
       Just ((Type littype@(Unqualified (Struct { fields }))), _) ->
           let (newstate, analyzedFieldValues) = analyzeFieldValues state fields tfieldvalues in
-          (newstate, TStructLiteral { tag=littype, tstructname=tstructname, tfieldvalues=analyzedFieldValues })
+          (passup state newstate, TStructLiteral { tag=littype, tstructname=tstructname, tfieldvalues=analyzedFieldValues })
       Nothing -> error $ "Name '" ++ tstructname ++ "' is undeclared"
       _ -> error $ tstructname ++ " in structure literal is not a structure"
     where analyzeFieldValues state fields tfieldvalues = let ((finalstate, _), anavalues) = mapAccumL (analyzeFieldValues' fields) (state, Set.empty) tfieldvalues in
@@ -235,11 +239,26 @@ analyze' state@(AnalyzerState { symbols }) (TStructLiteral { tstructname, tfield
                                                             error $ printf "Value of type %s cannot be used to initialize field %s of type %s in struct %s (in structure literal)" (show (tag analyzedInitializer)) fieldname (show declaredFieldType) tstructname
                               _ -> error $ "Structure " ++ tstructname ++ " has no member named " ++ fieldname ++ " (in structure literal)"
 
+analyze' state (TMemberAccess { ttarget, tmember }) =
+    let (newstate, analyzedTarget) = analyze' state ttarget in
+    (passup state newstate, memberAccess analyzedTarget (tag analyzedTarget))
+    -- memberAccess builds up pointer dereferences until it gets to
+    -- the underlying struct type, then returns a TMemberAccess to the
+    -- member.
+    where memberAccess term (Unqualified (Struct { fields, name=structName })) = case lookup tmember fields of
+                                                                                   Just fieldType -> TMemberAccess { tag=fieldType, ttarget=term, tmember=tmember }
+                                                                                   _ -> error $ "Structure of type " ++ structName ++ " has no member named " ++ tmember
+          memberAccess term (Mutable unqualified@(Unqualified (Struct { }))) = let access = memberAccess term unqualified in
+                                                                               access { tag=Mutable (tag access) }
+          memberAccess term (Mutable mtype) = memberAccess term mtype
+          memberAccess term (Ptr target) = memberAccess (TDeref { tag=target, toperand=term }) target
+          memberAccess _ badtype = error $ "Can't access member " ++ tmember ++ " of object of type " ++ (show badtype) ++ ": is not a structure"
+
 analyze' state (TAssign { tavar, tavalue }) =
     let (substate, analyzedVar) = analyze' state tavar
         (substate', analyzedValue) = analyze' substate tavalue in
     if typesAreCompatible (tag analyzedVar) (tag analyzedValue) && isMutable (tag analyzedVar) && isLvalue tavar then
-        (state, TAssign { tag=tag analyzedVar, tavar=analyzedVar, tavalue=analyzedValue })
+        (passup state substate', TAssign { tag=tag analyzedVar, tavar=analyzedVar, tavalue=analyzedValue })
     else
         error $ "Illegal assignment to " ++ (show analyzedVar) ++ " of " ++ (show analyzedVar)
 
@@ -254,20 +273,25 @@ analyze' state@(AnalyzerState { symbols, scopeLevel, nextTypeID }) (TStruct { tf
     | otherwise = (newstate, TStruct { tag=voidType, tfields=tfields, tname=tname })
     where newstate = state { symbols=Map.insert tname (Type (Unqualified (Struct { typeid=nextTypeID, fields=map processFields tfields, name=tname })), scopeLevel) symbols,
                              nextTypeID=nextTypeID + 1 }
-          processFields (name, decltype) = (name, decltypeToTypeInfo newstate decltype)
+          processFields (name, decltype) = (name, checkFieldType name $ decltypeToTypeInfo newstate decltype)
+          checkFieldType name (Mutable _) = error $ "Cannot specifiy mutability of structure member " ++ name ++ " in definition of struct " ++ tname
+          checkFieldType _ t = t
 
 analyze' state (TReturn { tvalue=Nothing }) = (state, TReturn { tag=voidType, tvalue=Nothing })
 
 analyze' state (TDeref { toperand }) =
     let (newstate, analyzedOp) = analyze' state toperand in
-    (newstate, TDeref { tag=derefType (tag analyzedOp), toperand=analyzedOp })
+    (passup state newstate, TDeref { tag=derefType (tag analyzedOp), toperand=analyzedOp })
     where derefType (Mutable (Ptr x)) = x
           derefType (Ptr x) = x
           derefType x = error $ "Attempted to dereference non-pointer type " ++ (show x)
 
 analyze' state (TAddr { toperand }) =
     let (newstate, analyzedOp) = analyze' state toperand in
-    (newstate, TDeref { tag=Ptr (tag analyzedOp), toperand=analyzedOp })
+    if isLvalue analyzedOp then
+        (passup state newstate, TAddr { tag=Ptr (tag analyzedOp), toperand=analyzedOp })
+    else
+        error "Cannot take address of non-lvalue"
 
 analyze' state (TIntLiteral { tirepr }) = (state, TIntLiteral { tag=intType, tirepr=tirepr })
 analyze' state (TFloatLiteral { tfrepr }) = (state, TFloatLiteral { tag=floatType, tfrepr=tfrepr })
@@ -276,9 +300,9 @@ analyze' state (TStringLiteral { tsrepr }) = (state, TStringLiteral { tag=string
 analyze' state subscript@(TSubscript { ttarget, tsubscripts }) =
     case validDereferencePattern (tag analyzedTarget) (map tag analyzedSubscripts) of
       Nothing           -> error $ "Invalid dereference in " ++ (show subscript)
-      Just dereffedType -> (newstate', TSubscript { tag=dereffedType,
-                                                    ttarget=analyzedTarget,
-                                                    tsubscripts=analyzedSubscripts })
+      Just dereffedType -> (passup state newstate', TSubscript { tag=dereffedType,
+                                                                 ttarget=analyzedTarget,
+                                                                 tsubscripts=analyzedSubscripts })
     where (newstate, analyzedTarget) = analyze' state ttarget
           (newstate', analyzedSubscripts) = analyzeWithState' newstate tsubscripts
           validDereferencePattern (Mutable x) idxs = validDereferencePattern x idxs
@@ -286,8 +310,6 @@ analyze' state subscript@(TSubscript { ttarget, tsubscripts }) =
           validDereferencePattern (Array _ target) (idx:idxs) = if not (isIntegral idx) then Nothing else validDereferencePattern target idxs
           validDereferencePattern t [] = Just t
           validDereferencePattern _ _ = Nothing
-
-analyze' _ x = error $ "Attempted to analyze unrecognized form " ++ (show x)
 
 -- Expects the scope level to have already been incremented
 bindLambdaList :: AnalyzerState -> [LambdaArg] -> AnalyzerState
