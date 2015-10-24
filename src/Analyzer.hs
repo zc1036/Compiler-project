@@ -6,7 +6,7 @@ module Analyzer where
 import Utils (makeMap, recsearch)
 import Parser
 import Data.Maybe
-import qualified Data.Map.Lazy as Map
+import qualified Data.Map.Strict as Map
 import Data.List (intercalate, mapAccumL, elemIndex, lookup)
 import qualified Data.Set as Set
 import Text.Printf
@@ -177,13 +177,14 @@ analyze' state@(AnalyzerState { symbols }) (TName { tsrepr }) =
     case Map.lookup tsrepr symbols of
       Just (Variable vartype, _) -> (state, TName { tsrepr=tsrepr, tag=vartype })
       Just (Type _, _)           -> error $ "Unexpected typename '" ++ tsrepr ++ "'"
-      Nothing                    -> error $ "Undefined symbol '" ++ tsrepr ++ "'"
+      Nothing                    -> error $ "Symbol '" ++ tsrepr ++ "' not in scope"
 
-analyze' state@(AnalyzerState { scopeLevel }) (TLambda { rettype, tbindings, tbody }) =
+analyze' state@(AnalyzerState { scopeLevel, symbols }) (TLambda { rettype, tbindings, tbody }) =
     let rettypeinfo = decltypeToTypeInfo state rettype
         argstypeinfo = (map ((decltypeToTypeInfo state) . lambdaArgType) tbindings)
         lambdaType = (Ptr (Function rettypeinfo argstypeinfo))
-        lambdaState = bindLambdaList (state { scopeLevel=(Analyzer.scopeLevel state) + 1 }) tbindings
+        lambdaState = bindLambdaList (state { scopeLevel=(Analyzer.scopeLevel state) + 1,
+                                              symbols=symbolTableWithoutLocalValues }) tbindings
         (substate, analyzedBody) = analyzeWithState' lambdaState tbody
         wronglyTypedReturnStatement = recsearch (find1 (not . isLambda) (returnIsBad rettypeinfo)) analyzedBody
     in case wronglyTypedReturnStatement of
@@ -196,6 +197,9 @@ analyze' state@(AnalyzerState { scopeLevel }) (TLambda { rettype, tbindings, tbo
           returnIsBad good (TReturn { tvalue=Just val }) = not $ typesAreCompatible good (tag val)
           returnIsBad good (TReturn { tvalue=Nothing }) = good /= voidType
           returnIsBad _ _ = False
+          symbolTableWithoutLocalValues = Map.filter filterSymbolTable symbols
+          filterSymbolTable (Type _, _) = True
+          filterSymbolTable (Variable x, scope) = scope == globalScope
 
 analyze' state (TReturn { tvalue=Just val }) =
     let (substate, analyzedValue) = analyze' state val
