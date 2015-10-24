@@ -66,6 +66,9 @@ data Term a = TName          { tag :: a, tsrepr :: String }
             | TMemberAccess  { tag :: a, ttarget :: Term a, tmember :: String }
             | TTypedef       { tag :: a, ttypedefFrom :: DeclType, ttypedefTo :: String }
             | TStructLiteral { tag :: a, tstructname :: String, tfieldvalues :: [(String, Term a)] }
+            | TWhileLoop     { tag :: a, tcondition :: Term a, tbody :: [Term a] }
+            | TForLoop       { tag :: a, tvardecl :: Term a, tcondition :: Term a, tincrement :: Term a, tbody :: [Term a] }
+            | TIf            { tag :: a, tcondition :: Term a, ttruebranch :: Term a, tfalsebranch :: Maybe (Term a) }
               deriving (Show)
 
 -- Parser functions
@@ -180,18 +183,26 @@ sexprToTerm (StructLiteral x) = error $ "Malformed structure literal " ++ (show 
 sexprToTerm (List l) = listToTerm l
 
 listToTerm :: [SExpr] -> Term ()
-listToTerm ((SymbolLiteral "def"):name:t:value:[]) = case name of
-                                                       SymbolLiteral repr ->
-                                                           TDef { tag=(),
-                                                                  tname=repr,
-                                                                  ttype=(sexprToType t),
-                                                                  tvalue=Just (sexprToTerm value) }
-                                                       _ -> error $ "Expected symbol in definition, got" ++ (show name)
-listToTerm ((SymbolLiteral "def"):_) = error "Invalid DEF syntax"
+listToTerm ((SymbolLiteral "def"):(SymbolLiteral repr):t:value:[]) = TDef { tag=(),
+                                                                            tname=repr,
+                                                                            ttype=(sexprToType t),
+                                                                            tvalue=Just (sexprToTerm value) }
+listToTerm ((SymbolLiteral "def"):_) = error "Invalid def syntax"
 listToTerm ((SymbolLiteral "lambda"):rest) = processLambda rest
 listToTerm ((SymbolLiteral "return"):value:[]) = TReturn { tag=(), tvalue=Just (sexprToTerm value) }
 listToTerm ((SymbolLiteral "return"):[]) = TReturn { tag=(), tvalue=Nothing }
 listToTerm ((SymbolLiteral "struct"):(SymbolLiteral name):fields) = TStruct { tag=(), tname=name, tfields=map processStructField fields }
+listToTerm ((SymbolLiteral "for"):(List ((SymbolLiteral varname):t:value:[])):cond:increment:body) = TForLoop { tag=(),
+                                                                                                                tvardecl=TDef { tag=(), tname=varname, ttype=(sexprToType t), tvalue=Just (sexprToTerm value) },
+                                                                                                                tcondition=sexprToTerm cond,
+                                                                                                                tincrement=sexprToTerm increment,
+                                                                                                                tbody=map sexprToTerm body}
+listToTerm ((SymbolLiteral "for"):_) = error "Invalid for-loop syntax"
+listToTerm ((SymbolLiteral "while"):cond:body) = TWhileLoop { tag=(), tcondition=sexprToTerm cond, tbody=map sexprToTerm body }
+listToTerm ((SymbolLiteral "while"):_) = error "Invalid while-loop syntax"
+listToTerm ((SymbolLiteral "if":cond:truebranch:elsebranch:[])) = TIf { tag=(), tcondition=sexprToTerm cond, ttruebranch=sexprToTerm truebranch, tfalsebranch=Just (sexprToTerm elsebranch) }
+listToTerm ((SymbolLiteral "if":cond:truebranch:[])) = TIf { tag=(), tcondition=sexprToTerm cond, ttruebranch=sexprToTerm truebranch, tfalsebranch=Nothing }
+listToTerm ((SymbolLiteral "if":_)) = error "Invalid if syntax"
 listToTerm ((SymbolLiteral "="):var:val:[]) = TAssign { tag=(),
                                                         tavar=sexprToTerm var,
                                                         tavalue=sexprToTerm val }

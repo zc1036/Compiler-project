@@ -274,7 +274,7 @@ analyze' state@(AnalyzerState { symbols, scopeLevel, nextTypeID }) (TStruct { tf
     where newstate = state { symbols=Map.insert tname (Type (Unqualified (Struct { typeid=nextTypeID, fields=map processFields tfields, name=tname })), scopeLevel) symbols,
                              nextTypeID=nextTypeID + 1 }
           processFields (name, decltype) = (name, checkFieldType name $ decltypeToTypeInfo newstate decltype)
-          checkFieldType name (Mutable _) = error $ "Cannot specifiy mutability of structure member " ++ name ++ " in definition of struct " ++ tname
+          checkFieldType name (Mutable _) = error $ "Cannot specify mutability of structure member " ++ name ++ " in definition of struct " ++ tname
           checkFieldType _ t = t
 
 analyze' state (TReturn { tvalue=Nothing }) = (state, TReturn { tag=voidType, tvalue=Nothing })
@@ -310,6 +310,25 @@ analyze' state subscript@(TSubscript { ttarget, tsubscripts }) =
           validDereferencePattern (Array _ target) (idx:idxs) = if not (isIntegral idx) then Nothing else validDereferencePattern target idxs
           validDereferencePattern t [] = Just t
           validDereferencePattern _ _ = Nothing
+
+analyze' state (TWhileLoop { tcondition, tbody }) =
+    let (substate, analyzedCondition) = analyze' (state { scopeLevel=(scopeLevel state) + 1 }) tcondition
+        (substate', analyzedBody) = analyzeWithState' substate tbody in
+    (passup state substate', TWhileLoop { tag=voidType, tcondition=analyzedCondition, tbody=analyzedBody })
+
+analyze' state (TForLoop { tvardecl, tcondition, tincrement, tbody }) =
+    let (substate, (analyzedDecl:analyzedCondition:analyzedIncrement:analyzedBody)) = analyzeWithState' (state { scopeLevel=(scopeLevel state) + 1 }) (tvardecl:tcondition:tincrement:tbody) in
+    (passup state substate,
+     TForLoop { tag=voidType, tvardecl=analyzedDecl, tcondition=analyzedCondition, tincrement=analyzedIncrement, tbody=analyzedBody })
+
+analyze' state (TIf { tcondition, ttruebranch, tfalsebranch }) =
+    let (substate, analyzedCondition) = analyze' state { scopeLevel=(scopeLevel state) + 1 } tcondition
+        (substate', analyzedTrueBranch) = analyze' substate ttruebranch
+        (substate'', analyzedFalseBranch) = analyzeFalseBranch substate' tfalsebranch in
+    (passup state substate'', TIf { tag=voidType, tcondition=analyzedCondition, ttruebranch=analyzedTrueBranch, tfalsebranch=analyzedFalseBranch })
+    where analyzeFalseBranch state Nothing = (state, Nothing)
+          analyzeFalseBranch state (Just stmt) = let (substate, analyzedStmt) = analyze' state stmt in
+                                                 (substate, Just analyzedStmt)
 
 -- Expects the scope level to have already been incremented
 bindLambdaList :: AnalyzerState -> [LambdaArg] -> AnalyzerState
