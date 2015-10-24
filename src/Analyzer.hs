@@ -51,6 +51,7 @@ instance Eq QualifiedTypeInfo where
     (==) (Function rettype1 args1) (Function rettype2 args2) =
         rettype1 == rettype2 && (length args1) == (length args2) && (and (zipWith (==) args1 args2))
     (==) (Unqualified x) (Unqualified y) = x == y
+    (==) _ _ = False
 
 -- A "Named" is a thing that is stored in the symbol table.
 data Named = Variable QualifiedTypeInfo
@@ -102,10 +103,14 @@ isLvalue _ = False
 
 decltypeToTypeInfo :: AnalyzerState -> DeclType -> QualifiedTypeInfo
 decltypeToTypeInfo s (DeclPtr t) = Ptr (decltypeToTypeInfo s t)
-decltypeToTypeInfo s (DeclArray size t) = Array size (decltypeToTypeInfo s t)
+decltypeToTypeInfo s (DeclArray size t) = let arrtype@(Array _ elemtype) = Array size (decltypeToTypeInfo s t) in
+                                          if elemtype == voidType then error "Cannot declare array of void"
+                                          else arrtype
 decltypeToTypeInfo s (DeclMutable (DeclMutable _)) = error "Repeated mutability specifier in type"
 decltypeToTypeInfo s (DeclMutable (DeclArray _ _)) = error "Cannot declare a mutable array (did you mean array of mutable?)"
-decltypeToTypeInfo s (DeclMutable t) = Mutable (decltypeToTypeInfo s t)
+decltypeToTypeInfo s (DeclMutable t) = let mut@(Mutable mtype) = Mutable (decltypeToTypeInfo s t) in
+                                       if mtype == voidType then error "Cannot declare mutable void"
+                                       else mtype
 decltypeToTypeInfo s (DeclFunction rettype args) = Function (decltypeToTypeInfo s rettype) (map (decltypeToTypeInfo s) args)
 decltypeToTypeInfo (AnalyzerState { symbols }) (TypeName name) =
     case Map.lookup name symbols of
@@ -119,7 +124,7 @@ typesAreCompatible :: QualifiedTypeInfo -> QualifiedTypeInfo -> Bool
 typesAreCompatible (Ptr x) (Ptr y) = typesAreCompatible x y
 typesAreCompatible (Mutable x) (Mutable y) = typesAreCompatible x y
 typesAreCompatible x (Mutable y) = typesAreCompatible x y
-typesAreCompatible (Unqualified x) (Unqualified y) = x == y
+typesAreCompatible lhs@(Unqualified x) (Unqualified y) = lhs /= voidType && x == y
 typesAreCompatible (Function rettype1 args1) (Function rettype2 args2) =
     -- Function types have to match exactly; check ret types, arg
     -- counts, and then check each arg type and ensure they match exactly.
@@ -165,7 +170,9 @@ analyze' state@(AnalyzerState { symbols, scopeLevel, nextTypeID }) (TDef { tname
                                         Just declvalue -> let (substate, analyzed) = analyze' state declvalue
                                                           in (substate, Just analyzed)
                                         Nothing        -> (state, Nothing)
-          typeOfVar = (decltypeToTypeInfo state ttype)
+          typeOfVar = let vartype = (decltypeToTypeInfo state ttype) in
+                      if vartype == voidType then error "Cannot declare variable of type void"
+                      else vartype
           typeOfValue = case analyzedValue of
                           Just declvalue -> Just (tag declvalue)
                           Nothing        -> Nothing
@@ -194,7 +201,7 @@ analyze' state@(AnalyzerState { scopeLevel, symbols }) (TLambda { rettype, tbind
                       TLambda { tag=lambdaType, rettype=rettype, tbindings=tbindings, tbody=analyzedBody })
     where isLambda (TLambda { }) = True
           isLambda _             = False
-          returnIsBad good (TReturn { tvalue=Just val }) = not $ typesAreCompatible good (tag val)
+          returnIsBad good (TReturn { tvalue=Just val }) = not $ isInitializeableBy good (tag val)
           returnIsBad good (TReturn { tvalue=Nothing }) = good /= voidType
           returnIsBad _ _ = False
           symbolTableWithoutLocalValues = Map.filter filterSymbolTable symbols
@@ -261,7 +268,7 @@ analyze' state (TMemberAccess { ttarget, tmember }) =
 analyze' state (TAssign { tavar, tavalue }) =
     let (substate, analyzedVar) = analyze' state tavar
         (substate', analyzedValue) = analyze' substate tavalue in
-    if typesAreCompatible (tag analyzedVar) (tag analyzedValue) && isMutable (tag analyzedVar) && isLvalue tavar then
+    if isInitializeableBy (tag analyzedVar) (tag analyzedValue) && isMutable (tag analyzedVar) && isLvalue tavar then
         (passup state substate', TAssign { tag=tag analyzedVar, tavar=analyzedVar, tavalue=analyzedValue })
     else
         error $ "Illegal assignment to " ++ (show analyzedVar) ++ " of " ++ (show analyzedVar)
@@ -286,9 +293,11 @@ analyze' state (TReturn { tvalue=Nothing }) = (state, TReturn { tag=voidType, tv
 analyze' state (TDeref { toperand }) =
     let (newstate, analyzedOp) = analyze' state toperand in
     (passup state newstate, TDeref { tag=derefType (tag analyzedOp), toperand=analyzedOp })
-    where derefType (Mutable (Ptr x)) = x
-          derefType (Ptr x) = x
+    where derefType (Mutable (Ptr x)) = checkDerefType x
+          derefType (Ptr x) = checkDerefType x
           derefType x = error $ "Attempted to dereference non-pointer type " ++ (show x)
+          checkDerefType x = if x == voidType then error "Cannot dereference pointer to void"
+                             else x
 
 analyze' state (TAddr { toperand }) =
     let (newstate, analyzedOp) = analyze' state toperand in
@@ -342,6 +351,12 @@ bindLambdaList state@(AnalyzerState { symbols }) (arg:args) =
                                                (Variable (decltypeToTypeInfo state (lambdaArgType arg)), (scopeLevel state))
                                                symbols }) args
 
+-- Given two predicates, p and f, returns (Just Term) if (f Term) is
+-- True, otherwise recursively searches Term if (p Term) is True, or
+-- returns Nothing if both are False.
+-- So basically, find1 searches for a Term that satisfies f, but only
+-- "enters" a sub-Term if p returns True.
+-- Only searches executable code; not declarations.
 find1 :: (Term a -> Bool) -> (Term a -> Bool) -> Term a -> Maybe (Term a)
 find1 _ f t@(TName { }) = if f t then Just t else Nothing
 find1 _ f t@(TIntLiteral { }) = if f t then Just t else Nothing
@@ -372,6 +387,43 @@ find1 p f t@(TReturn { tvalue=Just x })
 find1 p f t@(TReturn { tvalue=Nothing })
     | f t = Just t
     | otherwise = Nothing
+find1 p f t@(TDeref { toperand })
+    | f t = Just t
+    | p t = find1 p f toperand
+    | otherwise = Nothing
+find1 p f t@(TAddr { toperand })
+    | f t = Just t
+    | p t = find1 p f toperand
+    | otherwise = Nothing
+find1 p f t@(TSubscript { ttarget, tsubscripts })
+    | f t = Just t
+    | p t = recsearch (find1 p f) (ttarget:tsubscripts)
+    | otherwise = Nothing
+find1 p f t@(TMemberAccess { ttarget })
+    | f t = Just t
+    | p t = find1 p f ttarget
+    | otherwise = Nothing
+find1 p f t@(TStructLiteral { tfieldvalues })
+    | f t = Just t
+    | p t = recsearch (find1 p f) $ map snd tfieldvalues
+    | otherwise = Nothing
+find1 p f t@(TWhileLoop { tcondition, tbody })
+    | f t = Just t
+    | p t = recsearch (find1 p f) (tcondition:tbody)
+    | otherwise = Nothing
+find1 p f t@(TForLoop { tvardecl, tcondition, tincrement, tbody })
+    | f t = Just t
+    | p t = recsearch (find1 p f) (tvardecl:tcondition:tincrement:tbody)
+    | otherwise = Nothing
+find1 p f t@(TIf { tcondition, ttruebranch, tfalsebranch=Nothing })
+    | f t = Just t
+    | p t = recsearch (find1 p f) (tcondition:ttruebranch:[])
+    | otherwise = Nothing
+find1 p f t@(TIf { tcondition, ttruebranch, tfalsebranch=Just tfalseb })
+    | f t = Just t
+    | p t = recsearch (find1 p f) (tcondition:ttruebranch:tfalseb:[])
+    | otherwise = Nothing
+find1 _ _ _ = Nothing
 
 analyze :: [Term ()] -> [TypedTerm]
 analyze terms = snd (analyzeWithState terms)
