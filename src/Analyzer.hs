@@ -425,8 +425,15 @@ find1 p f t@(TIf { tcondition, ttruebranch, tfalsebranch=Just tfalseb })
     | otherwise = Nothing
 find1 _ _ _ = Nothing
 
-analyze :: [Term ()] -> [TypedTerm]
-analyze terms = snd (analyzeWithState terms)
+analyzeToplevel :: [Term ()] -> [TypedTerm]
+analyzeToplevel terms = let result = snd (analyzeWithState terms) in
+                        case recsearch (find1 (\_ -> False) isExpression) result of
+                          Just thing -> error $ "Expressions not allowed at top-level"
+                          Nothing -> result
+    where isExpression (TDef { }) = False
+          isExpression (TStruct { }) = False
+          isExpression (TTypedef { }) = False
+          isExpression _ = True
 
 analyzeWithState :: [Term ()] -> (AnalyzerState, [TypedTerm])
 analyzeWithState terms = analyzeWithState'
