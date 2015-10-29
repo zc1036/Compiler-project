@@ -40,7 +40,7 @@ functionPtrRetType x = error $ (show x) ++ " is not a function pointer and so is
 instance Show QualifiedTypeInfo where
     show (Ptr x) = "ptr " ++ (show x)
     show (Array size x) = (show x) ++ "[" ++ (show size) ++ "]"
-    show (Mutable x) = "mut " ++ (show x)
+    show (Mutable x) = "mut-" ++ (show x)
     show (Function rettype args) = "(" ++ (intercalate " " (map show args)) ++ " -> " ++ (show rettype) ++ ")"
     show (Unqualified x) = show x
 
