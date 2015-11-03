@@ -66,8 +66,11 @@ data AnalyzerState = AnalyzerState { symbols :: SymbolTable, -- A map of declara
                                      nextTypeID :: Int }
                      deriving (Show)
 
-passup :: AnalyzerState -> AnalyzerState -> AnalyzerState
-passup x y = x { nextTypeID=nextTypeID y }
+-- Not to be confused with Knuth's up-arrow notation, this operator
+-- combines two states when the LHS is from a higher lexical scope
+-- than the RHS. The same convention is used in other modules as well.
+(↑) :: AnalyzerState -> AnalyzerState -> AnalyzerState
+(↑) state (AnalyzerState { nextTypeID=newNextTypeID }) = state { nextTypeID=newNextTypeID }
 
 globalScope :: Int
 globalScope = 0
@@ -183,7 +186,7 @@ analyze' :: AnalyzerState -> Term () -> (AnalyzerState, TypedTerm)
 analyze' state@(AnalyzerState { symbols, scopeLevel, nextTypeID }) (TDef { tname, ttype, tvalue })
     | (isRedeclaration tname symbols scopeLevel) = error $ tname ++ " redefined"
     | initializerTypeError = error $ "Types " ++ (show typeOfVar) ++ " and " ++ (show (fromJust typeOfValue)) ++ " are incompatible "
-    | otherwise = (passup (state { symbols=Map.insert tname (Variable typeOfVar, scopeLevel) symbols }) newstate,
+    | otherwise = ((state { symbols=Map.insert tname (Variable typeOfVar, scopeLevel) symbols }) ↑ newstate,
                    TDef { tag=voidType, tname=tname, ttype=ttype, tvalue=analyzedValue })
     where (newstate, analyzedValue) = case tvalue of
                                         Just declvalue -> let (substate, analyzed) = analyze' state declvalue
@@ -216,7 +219,7 @@ analyze' state@(AnalyzerState { scopeLevel, symbols }) (TLambda { rettype, tbind
     in case wronglyTypedReturnStatement of
          Just (TReturn { tvalue=Nothing }) -> error $ "Tried to return nothing from a function returning " ++ (show rettypeinfo)
          Just (TReturn { tvalue=Just val }) -> error $ "Tried to return a " ++ (show (tag val)) ++ " from a function returning " ++ (show rettypeinfo)
-         Nothing  -> (passup state substate,
+         Nothing  -> (state ↑ substate,
                       TLambda { tag=lambdaType, rettype=rettype, tbindings=tbindings, tbody=analyzedBody })
     where isLambda (TLambda { }) = True
           isLambda _             = False
@@ -229,12 +232,12 @@ analyze' state@(AnalyzerState { scopeLevel, symbols }) (TLambda { rettype, tbind
 
 analyze' state (TReturn { tvalue=Just val }) =
     let (substate, analyzedValue) = analyze' state val
-    in (passup state substate,
+    in (state ↑ substate,
         TReturn { tag=voidType, tvalue=Just analyzedValue })
 
 analyze' state (TFuncall { tfun, targs }) =
     let (substate, analyzedFunName) = analyze' state tfun
-        (substate', analyzedArgs) = analyzeWithState' (passup state substate) targs
+        (substate', analyzedArgs) = analyzeWithState' (state ↑ substate) targs
         paramTypes = functionPtrArgs (tag analyzedFunName)
         argTypes = (map tag analyzedArgs) in
     if length argTypes /= length paramTypes then
@@ -242,7 +245,7 @@ analyze' state (TFuncall { tfun, targs }) =
     else
         case elemIndex False (zipWith isInitializeableBy paramTypes argTypes) of
           Just idx -> error $ printf "Function argument %s, which is of type %s, is incompatible with type of parameter %d of %s, %s" (show (targs !! idx)) (show (tag (analyzedArgs !! idx))) (show (idx + 1)) (show tfun) (show ((functionPtrArgs (tag analyzedFunName)) !! idx))
-          Nothing  -> (passup state substate',
+          Nothing  -> (state ↑ substate',
                        TFuncall { tag=functionPtrRetType (tag analyzedFunName),
                                   tfun=analyzedFunName,
                                   targs=analyzedArgs })
@@ -251,7 +254,7 @@ analyze' state@(AnalyzerState { symbols }) (TStructLiteral { tstructname, tfield
     case Map.lookup tstructname symbols of
       Just ((Type littype@(Unqualified (Struct { fields }))), _) ->
           let (newstate, analyzedFieldValues) = analyzeFieldValues state fields tfieldvalues in
-          (passup state newstate, TStructLiteral { tag=littype, tstructname=tstructname, tfieldvalues=analyzedFieldValues })
+          (state ↑ newstate, TStructLiteral { tag=littype, tstructname=tstructname, tfieldvalues=analyzedFieldValues })
       Nothing -> error $ "Name '" ++ tstructname ++ "' is undeclared"
       _ -> error $ tstructname ++ " in structure literal is not a structure"
     where analyzeFieldValues state fields tfieldvalues = let ((finalstate, _), anavalues) = mapAccumL (analyzeFieldValues' fields) (state, Set.empty) tfieldvalues in
@@ -271,7 +274,7 @@ analyze' state@(AnalyzerState { symbols }) (TStructLiteral { tstructname, tfield
 
 analyze' state (TMemberAccess { ttarget, tmember }) =
     let (newstate, analyzedTarget) = analyze' state ttarget in
-    (passup state newstate, memberAccess analyzedTarget (tag analyzedTarget))
+    (state ↑ newstate, memberAccess analyzedTarget (tag analyzedTarget))
     -- memberAccess builds up pointer dereferences until it gets to
     -- the underlying struct type, then returns a TMemberAccess to the
     -- member.
@@ -286,9 +289,9 @@ analyze' state (TMemberAccess { ttarget, tmember }) =
 
 analyze' state (TAssign { tavar, tavalue }) =
     let (substate, analyzedVar) = analyze' state tavar
-        (substate', analyzedValue) = analyze' (passup state substate) tavalue in
+        (substate', analyzedValue) = analyze' (state ↑ substate) tavalue in
     if isInitializeableBy (tag analyzedVar) (tag analyzedValue) && isMutable (tag analyzedVar) && isLvalue tavar then
-        (passup state substate', TAssign { tag=tag analyzedVar, tavar=analyzedVar, tavalue=analyzedValue })
+        (state ↑ substate', TAssign { tag=tag analyzedVar, tavar=analyzedVar, tavalue=analyzedValue })
     else
         error $ "Illegal assignment to " ++ (show analyzedVar) ++ " of " ++ (show analyzedVar)
 
@@ -311,7 +314,7 @@ analyze' state (TReturn { tvalue=Nothing }) = (state, TReturn { tag=voidType, tv
 
 analyze' state (TDeref { toperand }) =
     let (newstate, analyzedOp) = analyze' state toperand in
-    (passup state newstate, TDeref { tag=derefType (tag analyzedOp), toperand=analyzedOp })
+    (state ↑ newstate, TDeref { tag=derefType (tag analyzedOp), toperand=analyzedOp })
     where derefType (Mutable (Ptr x)) = checkDerefType x
           derefType (Ptr x) = checkDerefType x
           derefType x = error $ "Attempted to dereference non-pointer type " ++ (show x)
@@ -321,7 +324,7 @@ analyze' state (TDeref { toperand }) =
 analyze' state (TAddr { toperand }) =
     let (newstate, analyzedOp) = analyze' state toperand in
     if isLvalue analyzedOp then
-        (passup state newstate, TAddr { tag=Ptr (tag analyzedOp), toperand=analyzedOp })
+        (state ↑ newstate, TAddr { tag=Ptr (tag analyzedOp), toperand=analyzedOp })
     else
         error "Cannot take address of non-lvalue"
 
@@ -332,11 +335,11 @@ analyze' state (TStringLiteral { tsrepr }) = (state, TStringLiteral { tag=string
 analyze' state subscript@(TSubscript { ttarget, tsubscripts }) =
     case validDereferencePattern (tag analyzedTarget) (map tag analyzedSubscripts) of
       Nothing           -> error $ "Invalid dereference in " ++ (show subscript)
-      Just dereffedType -> (passup state newstate', TSubscript { tag=dereffedType,
-                                                                 ttarget=analyzedTarget,
-                                                                 tsubscripts=analyzedSubscripts })
+      Just dereffedType -> (state ↑ newstate', TSubscript { tag=dereffedType,
+                                                            ttarget=analyzedTarget,
+                                                            tsubscripts=analyzedSubscripts })
     where (newstate, analyzedTarget) = analyze' state ttarget
-          (newstate', analyzedSubscripts) = analyzeWithState' (passup state newstate) tsubscripts
+          (newstate', analyzedSubscripts) = analyzeWithState' (state ↑ newstate) tsubscripts
           validDereferencePattern (Mutable x) idxs = validDereferencePattern x idxs
           validDereferencePattern (Ptr target) (idx:idxs) = if not (isIntegral idx) then Nothing else validDereferencePattern target idxs
           validDereferencePattern (Array _ target) (idx:idxs) = if not (isIntegral idx) then Nothing else validDereferencePattern target idxs
@@ -346,18 +349,18 @@ analyze' state subscript@(TSubscript { ttarget, tsubscripts }) =
 analyze' state (TWhileLoop { tcondition, tbody }) =
     let (substate, analyzedCondition) = analyze' (state { scopeLevel=(scopeLevel state) + 1 }) tcondition
         (substate', analyzedBody) = analyzeWithState' substate tbody in
-    (passup state substate', TWhileLoop { tag=voidType, tcondition=analyzedCondition, tbody=analyzedBody })
+    (state ↑ substate', TWhileLoop { tag=voidType, tcondition=analyzedCondition, tbody=analyzedBody })
 
 analyze' state (TForLoop { tvardecl, tcondition, tincrement, tbody }) =
     let (substate, (analyzedDecl:analyzedCondition:analyzedIncrement:analyzedBody)) = analyzeWithState' (state { scopeLevel=(scopeLevel state) + 1 }) (tvardecl:tcondition:tincrement:tbody) in
-    (passup state substate,
+    (state ↑ substate,
      TForLoop { tag=voidType, tvardecl=analyzedDecl, tcondition=analyzedCondition, tincrement=analyzedIncrement, tbody=analyzedBody })
 
 analyze' state (TIf { tcondition, ttruebranch, tfalsebranch }) =
     let (substate, analyzedCondition) = analyze' state { scopeLevel=(scopeLevel state) + 1 } tcondition
         (substate', analyzedTrueBranch) = analyze' substate ttruebranch
-        (substate'', analyzedFalseBranch) = analyzeFalseBranch (passup substate substate') tfalsebranch in
-    (passup state substate'', TIf { tag=voidType, tcondition=analyzedCondition, ttruebranch=analyzedTrueBranch, tfalsebranch=analyzedFalseBranch })
+        (substate'', analyzedFalseBranch) = analyzeFalseBranch (substate ↑ substate') tfalsebranch in
+    (state ↑ substate'', TIf { tag=voidType, tcondition=analyzedCondition, ttruebranch=analyzedTrueBranch, tfalsebranch=analyzedFalseBranch })
     where analyzeFalseBranch state Nothing = (state, Nothing)
           analyzeFalseBranch state (Just stmt) = let (substate, analyzedStmt) = analyze' state stmt in
                                                  (substate, Just analyzedStmt)

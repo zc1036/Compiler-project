@@ -7,12 +7,12 @@ import qualified Parser as P
 import qualified Analyzer as A
 import Data.Maybe
 import qualified Data.Map.Strict as Map
-import Data.List (foldl, mapAccumL)
+import Data.List (foldl, mapAccumL, intercalate)
 import Text.Printf
 
 data VReg = VReg { regsize :: Integer, regid :: Int, regconst :: Bool }
 
-instance Show Vreg where
+instance Show VReg where
     show (VReg { regsize, regid, regconst })
          | regconst = "$" ++ (show regid) ++ "c." ++ (show regsize)
          | otherwise = "$" ++ (show regid) ++ "." ++ (show regsize)
@@ -32,7 +32,7 @@ data Instr = Call VReg Int [VReg] -- dst, func id, [args]
 
 instance Show Instr where
     show (Call dst funcid regs) = printf "call %s = funcs[%d] (%s)" (show dst) funcid (intercalate ", " $ map show regs)
-    show (ICall dst func regs) = printf "icall %s = %s (%s)" (show dst) (show func) (intercalate ", " $ map show args)
+    show (ICall dst func regs) = printf "icall %s = %s (%s)" (show dst) (show func) (intercalate ", " $ map show regs)
     show (Return reg) = printf "ret %s" (show reg)
     show (MemberAccess dst obj offset size) = printf "member %s = (%s + %d).%d" (show dst) (show obj) offset size
     show (Move dst src) = printf "move %s = %s" (show dst) (show src)
@@ -64,9 +64,9 @@ defaultCstate = LIRState { cnextVRegID=1,
                            csymbols=Map.empty,
                            cscopeLevel=A.globalScope }
 
-passup :: LIRState -> LIRState -> LIRState
-passup state newstate = state { cnextVRegID=(cnextVRegID newstate),
-                                cnextFuncID=(cnextFuncID newstate) }
+(↑) :: LIRState -> LIRState -> LIRState
+state ↑ newstate = state { cnextVRegID=(cnextVRegID newstate),
+                            cnextFuncID=(cnextFuncID newstate) }
 
 data Program = Program { progLambdas :: FuncTable, progSymbols :: SymbolRegTable }
 
@@ -113,15 +113,17 @@ astToLIR state (P.TStringLiteral { P.tsrepr }) =
     (newstate, (Just reg, [LoadStringPtr reg tsrepr]))
 
 astToLIR state (P.TFuncall { P.tag, P.tfun, P.targs }) =
-    let (newstate, (Just funcreg, funcinstrs):operandsLIR) = mapAccumL (\s -> astToLIR $ passup state s) state (tfun:targs)
+    let (newstate, (Just funcreg, funcinstrs):operandsLIR) = mapAccumL (\s -> astToLIR $ state ↑ s) state (tfun:targs)
         (newstate', callreg) = newreg newstate (A.sizeFromType tag) True in
-    (passup state newstate', (Just callreg,
-                              concat $ [funcinstrs,
-                                        concat $ map snd operandsLIR,
-                                        [ICall callreg funcreg $ map (fromJust . fst) operandsLIR]]))
+    (state ↑ newstate', (Just callreg,
+                         concat $ [funcinstrs,
+                                   concat $ map snd operandsLIR,
+                                   [ICall callreg funcreg $ map (fromJust . fst) operandsLIR]]))
 
-astToLIR state (P.TDef { tag, tname, tvalue }) =
-    let (newstate, (Just valuereg, valueinstrs)) = 
+astToLIR state (P.TDef { tag, tname, tvalue=Just val }) =
+    let (newstate, (Just valuereg, valueinstrs)) = astToLIR state val
+        (newstate', reg) = newreg 
+    
 
 -- let reg = VReg { regsize=A.sizeFromType tag, regid=cnextVRegID, regconst=not $ A.isMutable tag } in
 --                  (state { cnextVRegID=cnextVRegID + 1, csymbols=Map.insert tsrepr reg csymbols }, Just reg, [])
