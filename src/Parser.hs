@@ -24,7 +24,7 @@ instance Show SExpr where
     show (FloatLiteral x) = (show x)
     show (SymbolLiteral x) = x
     show (StringLiteral x) = show x
-    show (List x) = "(" ++ (intercalate " " (map show x)) ++ ")"
+    show (List x) = "(" ++ (intercalate " " $ map show x) ++ ")"
 
 -- The difference between DeclType here and TBuiltinType below is that
 -- the DeclTypes are the "objects" and the TBuiltinTypes are the

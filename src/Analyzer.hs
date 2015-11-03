@@ -101,6 +101,25 @@ isLvalue (TSubscript { }) = True
 isLvalue (TMemberAccess { }) = True
 isLvalue _ = False
 
+pointerSize = 8
+intSize = 8
+charSize = 1
+floatSize = 8
+
+sizeFromType :: QualifiedTypeInfo -> Integer
+sizeFromType (Mutable x) = sizeFromType x
+sizeFromType (Ptr _) = pointerSize
+sizeFromType (Array count atype) = count * (sizeFromType atype)
+sizeFromType t@(Unqualified (BuiltinType { typeid }))
+    | typeid == intTypeID = intSize
+    | typeid == charTypeID = charSize
+    | typeid == floatTypeID = floatSize
+    | typeid == voidTypeID = error "void has no size"
+    | typeid == nullTypeID = pointerSize
+    | otherwise = error $ "Unexpected builtin type " ++ (show t)
+sizeFromType (Unqualified (Struct { fields })) = foldl (+) 0 $ map (sizeFromType . snd) fields
+sizeFromType (Function { }) = error "Functions have no size"
+
 decltypeToTypeInfo :: AnalyzerState -> DeclType -> QualifiedTypeInfo
 decltypeToTypeInfo s (DeclPtr t) = Ptr (decltypeToTypeInfo s t)
 decltypeToTypeInfo s (DeclArray size t) = let arrtype@(Array _ elemtype) = Array size (decltypeToTypeInfo s t) in
@@ -215,7 +234,7 @@ analyze' state (TReturn { tvalue=Just val }) =
 
 analyze' state (TFuncall { tfun, targs }) =
     let (substate, analyzedFunName) = analyze' state tfun
-        (substate', analyzedArgs) = analyzeWithState' substate targs
+        (substate', analyzedArgs) = analyzeWithState' (passup state substate) targs
         paramTypes = functionPtrArgs (tag analyzedFunName)
         argTypes = (map tag analyzedArgs) in
     if length argTypes /= length paramTypes then
@@ -267,7 +286,7 @@ analyze' state (TMemberAccess { ttarget, tmember }) =
 
 analyze' state (TAssign { tavar, tavalue }) =
     let (substate, analyzedVar) = analyze' state tavar
-        (substate', analyzedValue) = analyze' substate tavalue in
+        (substate', analyzedValue) = analyze' (passup state substate) tavalue in
     if isInitializeableBy (tag analyzedVar) (tag analyzedValue) && isMutable (tag analyzedVar) && isLvalue tavar then
         (passup state substate', TAssign { tag=tag analyzedVar, tavar=analyzedVar, tavalue=analyzedValue })
     else
@@ -317,7 +336,7 @@ analyze' state subscript@(TSubscript { ttarget, tsubscripts }) =
                                                                  ttarget=analyzedTarget,
                                                                  tsubscripts=analyzedSubscripts })
     where (newstate, analyzedTarget) = analyze' state ttarget
-          (newstate', analyzedSubscripts) = analyzeWithState' newstate tsubscripts
+          (newstate', analyzedSubscripts) = analyzeWithState' (passup state newstate) tsubscripts
           validDereferencePattern (Mutable x) idxs = validDereferencePattern x idxs
           validDereferencePattern (Ptr target) (idx:idxs) = if not (isIntegral idx) then Nothing else validDereferencePattern target idxs
           validDereferencePattern (Array _ target) (idx:idxs) = if not (isIntegral idx) then Nothing else validDereferencePattern target idxs
@@ -337,7 +356,7 @@ analyze' state (TForLoop { tvardecl, tcondition, tincrement, tbody }) =
 analyze' state (TIf { tcondition, ttruebranch, tfalsebranch }) =
     let (substate, analyzedCondition) = analyze' state { scopeLevel=(scopeLevel state) + 1 } tcondition
         (substate', analyzedTrueBranch) = analyze' substate ttruebranch
-        (substate'', analyzedFalseBranch) = analyzeFalseBranch substate' tfalsebranch in
+        (substate'', analyzedFalseBranch) = analyzeFalseBranch (passup substate substate') tfalsebranch in
     (passup state substate'', TIf { tag=voidType, tcondition=analyzedCondition, ttruebranch=analyzedTrueBranch, tfalsebranch=analyzedFalseBranch })
     where analyzeFalseBranch state Nothing = (state, Nothing)
           analyzeFalseBranch state (Just stmt) = let (substate, analyzedStmt) = analyze' state stmt in
@@ -443,4 +462,4 @@ analyzeWithState terms = analyzeWithState'
                          terms
 
 analyzeWithState' :: AnalyzerState -> [Term ()] -> (AnalyzerState, [TypedTerm])
-analyzeWithState' state terms = mapAccumL analyze' state terms
+analyzeWithState' = mapAccumL analyze'
