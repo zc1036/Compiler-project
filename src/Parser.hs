@@ -46,7 +46,7 @@ data Term a = TName          { tag :: a, tsrepr :: String }
             | TFloatLiteral  { tag :: a, tfrepr :: Float }
             | TStringLiteral { tag :: a, tsrepr :: String }
             | TFuncall       { tag :: a, tfun :: Term a, targs :: [Term a] }
-            | TDef           { tag :: a, tname :: String, ttype :: DeclType, tvalue :: Maybe (Term a) }
+            | TDef           { tag :: a, vartag :: a, tname :: String, ttype :: DeclType, tvalue :: Maybe (Term a) }
             | TLambda        { tag :: a, rettype :: DeclType, tbindings :: [Term a], tbody :: [Term a] } -- tbindings is a list of TDefs
             | TStruct        { tag :: a, tfields :: [(String, DeclType)], tname :: String }
             | TAssign        { tag :: a, tavar :: Term a, tavalue :: Term a }
@@ -175,6 +175,7 @@ sexprToTerm (List l) = listToTerm l
 
 listToTerm :: [SExpr] -> Term ()
 listToTerm ((SymbolLiteral "def"):(SymbolLiteral repr):t:value:[]) = TDef { tag=(),
+                                                                            vartag=(),
                                                                             tname=repr,
                                                                             ttype=(sexprToType t),
                                                                             tvalue=Just (sexprToTerm value) }
@@ -183,11 +184,12 @@ listToTerm ((SymbolLiteral "lambda"):rest) = processLambda rest
 listToTerm ((SymbolLiteral "return"):value:[]) = TReturn { tag=(), tvalue=Just (sexprToTerm value) }
 listToTerm ((SymbolLiteral "return"):[]) = TReturn { tag=(), tvalue=Nothing }
 listToTerm ((SymbolLiteral "struct"):(SymbolLiteral name):fields) = TStruct { tag=(), tname=name, tfields=map processStructField fields }
-listToTerm ((SymbolLiteral "for"):(List ((SymbolLiteral varname):t:value:[])):cond:increment:body) = TForLoop { tag=(),
-                                                                                                                tvardecl=TDef { tag=(), tname=varname, ttype=sexprToType t, tvalue=Just $ sexprToTerm value },
-                                                                                                                tcondition=sexprToTerm cond,
-                                                                                                                tincrement=sexprToTerm increment,
-                                                                                                                tbody=map sexprToTerm body}
+listToTerm ((SymbolLiteral "for"):(List ((SymbolLiteral varname):t:value:[])):cond:increment:body) =
+    TForLoop { tag=(),
+               tvardecl=TDef { tag=(), vartag=(), tname=varname, ttype=sexprToType t, tvalue=Just $ sexprToTerm value },
+               tcondition=sexprToTerm cond,
+               tincrement=sexprToTerm increment,
+               tbody=map sexprToTerm body}
 listToTerm ((SymbolLiteral "for"):_) = error "Invalid for-loop syntax"
 listToTerm ((SymbolLiteral "while"):cond:body) = TWhileLoop { tag=(), tcondition=sexprToTerm cond, tbody=map sexprToTerm body }
 listToTerm ((SymbolLiteral "while"):_) = error "Invalid while-loop syntax"
@@ -219,7 +221,8 @@ processLambda (rettype:(List args):body) = TLambda { tag=(),
 processLambda x = error $ "Malformed lambda: " ++ (show x)
 
 processLambdaArg :: SExpr -> Term ()
-processLambdaArg (List ((SymbolLiteral name):argtype:[])) = TDef { tag=(), tname=name, ttype=(sexprToType argtype), tvalue=Nothing }
+processLambdaArg (List ((SymbolLiteral name):argtype:[])) =
+    TDef { tag=(), vartag=(), tname=name, ttype=(sexprToType argtype), tvalue=Nothing }
 processLambdaArg x = error $ "Malformed lambda parameter: " ++ (show x)
 
 sexprToType :: SExpr -> DeclType
