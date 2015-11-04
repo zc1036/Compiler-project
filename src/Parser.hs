@@ -39,15 +39,6 @@ data DeclType = DeclPtr DeclType
               | TypeName String
                 deriving (Show)
 
-data LambdaArg = LambdaArg String DeclType
-                 deriving (Show)
-
-lambdaArgName :: LambdaArg -> String
-lambdaArgName (LambdaArg name _) = name
-
-lambdaArgType :: LambdaArg -> DeclType
-lambdaArgType (LambdaArg _ dtype) = dtype
-
 -- The type variable "a" allows storing arbitrary data in the tree
 -- structure in the "tag" field
 data Term a = TName          { tag :: a, tsrepr :: String }
@@ -56,7 +47,7 @@ data Term a = TName          { tag :: a, tsrepr :: String }
             | TStringLiteral { tag :: a, tsrepr :: String }
             | TFuncall       { tag :: a, tfun :: Term a, targs :: [Term a] }
             | TDef           { tag :: a, tname :: String, ttype :: DeclType, tvalue :: Maybe (Term a) }
-            | TLambda        { tag :: a, rettype :: DeclType, tbindings :: [LambdaArg], tbody :: [Term a] }
+            | TLambda        { tag :: a, rettype :: DeclType, tbindings :: [Term a], tbody :: [Term a] } -- tbindings is a list of TDefs
             | TStruct        { tag :: a, tfields :: [(String, DeclType)], tname :: String }
             | TAssign        { tag :: a, tavar :: Term a, tavalue :: Term a }
             | TReturn        { tag :: a, tvalue :: Maybe (Term a) }
@@ -193,7 +184,7 @@ listToTerm ((SymbolLiteral "return"):value:[]) = TReturn { tag=(), tvalue=Just (
 listToTerm ((SymbolLiteral "return"):[]) = TReturn { tag=(), tvalue=Nothing }
 listToTerm ((SymbolLiteral "struct"):(SymbolLiteral name):fields) = TStruct { tag=(), tname=name, tfields=map processStructField fields }
 listToTerm ((SymbolLiteral "for"):(List ((SymbolLiteral varname):t:value:[])):cond:increment:body) = TForLoop { tag=(),
-                                                                                                                tvardecl=TDef { tag=(), tname=varname, ttype=(sexprToType t), tvalue=Just (sexprToTerm value) },
+                                                                                                                tvardecl=TDef { tag=(), tname=varname, ttype=sexprToType t, tvalue=Just $ sexprToTerm value },
                                                                                                                 tcondition=sexprToTerm cond,
                                                                                                                 tincrement=sexprToTerm increment,
                                                                                                                 tbody=map sexprToTerm body}
@@ -227,8 +218,8 @@ processLambda (rettype:(List args):body) = TLambda { tag=(),
                                                      tbody=(map sexprToTerm body) }
 processLambda x = error $ "Malformed lambda: " ++ (show x)
 
-processLambdaArg :: SExpr -> LambdaArg
-processLambdaArg (List ((SymbolLiteral name):argtype:[])) = LambdaArg name (sexprToType argtype)
+processLambdaArg :: SExpr -> Term ()
+processLambdaArg (List ((SymbolLiteral name):argtype:[])) = TDef { tag=(), tname=name, ttype=(sexprToType argtype), tvalue=Nothing }
 processLambdaArg x = error $ "Malformed lambda parameter: " ++ (show x)
 
 sexprToType :: SExpr -> DeclType

@@ -46,7 +46,12 @@ instance Show Instr where
 type Term = P.Term
 
 type SymbolRegTable = Map.Map String VReg
-type FuncTable = Map.Map Int [Instr]
+
+-- The [VReg] is a list of the registers used in the body for the
+-- parameters of this function.
+data FuncInstrs = FuncInstrs [VReg] [Instr] -- arg-registers instructions
+
+type FuncTable = Map.Map Int FuncInstrs
 
 data LIRState = LIRState { cnextVRegID :: Int,
                            cnextFuncID :: Int,
@@ -55,9 +60,8 @@ data LIRState = LIRState { cnextVRegID :: Int,
                            cscopeLevel :: Int }
 
 -- The ID of the function that gets called before main
-setupLambdaID=0
+setupLambdaID = 0
 
-defaultCstate :: LIRState
 defaultCstate = LIRState { cnextVRegID=1,
                            cnextFuncID=setupLambdaID + 1,
                            clambdas=Map.empty,
@@ -65,8 +69,8 @@ defaultCstate = LIRState { cnextVRegID=1,
                            cscopeLevel=A.globalScope }
 
 (↑) :: LIRState -> LIRState -> LIRState
-state ↑ newstate = state { cnextVRegID=(cnextVRegID newstate),
-                            cnextFuncID=(cnextFuncID newstate) }
+state ↑ newstate = state { cnextVRegID=cnextVRegID newstate,
+                           cnextFuncID=cnextFuncID newstate }
 
 data Program = Program { progLambdas :: FuncTable, progSymbols :: SymbolRegTable }
 
@@ -120,13 +124,27 @@ astToLIR state (P.TFuncall { P.tag, P.tfun, P.targs }) =
                                    concat $ map snd operandsLIR,
                                    [ICall callreg funcreg $ map (fromJust . fst) operandsLIR]]))
 
-astToLIR state (P.TDef { tag, tname, tvalue=Just val }) =
+astToLIR state@(LIRState { csymbols }) (P.TDef { P.tag, P.tname, P.tvalue=Just val }) =
     let (newstate, (Just valuereg, valueinstrs)) = astToLIR state val
-        (newstate', reg) = newreg 
-    
+        (newstate', reg) = newreg (state ↑ newstate) (A.sizeFromType tag) (not A.isMutable tag) in
+    ((state ↑ newstate') { csymbols=Map.insert tname reg csymbols },
+     (Just reg, valueinstrs))
 
--- let reg = VReg { regsize=A.sizeFromType tag, regid=cnextVRegID, regconst=not $ A.isMutable tag } in
---                  (state { cnextVRegID=cnextVRegID + 1, csymbols=Map.insert tsrepr reg csymbols }, Just reg, [])
+astToLIR state@(LIRState { csymbols }) (P.TDef { P.tag, P.tname, P.tvalue=Nothing }) =
+    let (newstate, reg) = newreg (state ↑ newstate) (A.sizeFromType tag) (not A.isMutable tag) in
+    (newstate { csymbols=Map.insert tname reg csymbols }, (Just reg, []))
+
+astToLIR state@(LIRState { clambdas, cnextFuncID, csymbols }) (P.TLambda { P.tag, P.tbody, P.tbindings }) =
+    let (lambdaState, _) = astToLIRToplevel' state tbindings
+        (bodystate, bodyinstrs) = astToLIRToplevel' lambdaState tbody
+        (regstate, funcPtrReg) = newreg (state ↑ bodystate) (A.sizeFromType tag) True in
+    (regstate { clambdas=Map.insert cnextFuncID (FuncInstrs  bodyinstrs) clambdas,
+                cnextFuncID=cnextFuncID + 1 },
+     (Just funcPtrReg, [LoadFuncAddr funcPtrReg cnextFuncID]))
+    where symbolTableWithoutLocalValues = Map.filter filterSymbolTable csymbols
+          filterSymbolTable (Type _, _) = True
+          filterSymbolTable (Variable x, scope) = scope == globalScope
+
 
 astToLIR state (P.TStruct { }) = (state, (Nothing, []))
 

@@ -210,17 +210,17 @@ analyze' state@(AnalyzerState { symbols }) (TName { tsrepr }) =
 
 analyze' state@(AnalyzerState { scopeLevel, symbols }) (TLambda { rettype, tbindings, tbody }) =
     let rettypeinfo = decltypeToTypeInfo state rettype
-        argstypeinfo = (map ((decltypeToTypeInfo state) . lambdaArgType) tbindings)
+        argstypeinfo = (map ((decltypeToTypeInfo state) . ttype) tbindings)
         lambdaType = (Ptr (Function rettypeinfo argstypeinfo))
-        lambdaState = bindLambdaList (state { scopeLevel=(Analyzer.scopeLevel state) + 1,
-                                              symbols=symbolTableWithoutLocalValues }) tbindings
+        (lambdaState, analyzedBindings) = analyzeWithState' (state { scopeLevel=scopeLevel + 1,
+                                                                     symbols=symbolTableWithoutLocalValues }) tbindings
         (substate, analyzedBody) = analyzeWithState' lambdaState tbody
         wronglyTypedReturnStatement = recsearch (find1 (not . isLambda) (returnIsBad rettypeinfo)) analyzedBody
     in case wronglyTypedReturnStatement of
          Just (TReturn { tvalue=Nothing }) -> error $ "Tried to return nothing from a function returning " ++ (show rettypeinfo)
          Just (TReturn { tvalue=Just val }) -> error $ "Tried to return a " ++ (show (tag val)) ++ " from a function returning " ++ (show rettypeinfo)
          Nothing  -> (state ↑ substate,
-                      TLambda { tag=lambdaType, rettype=rettype, tbindings=tbindings, tbody=analyzedBody })
+                      TLambda { tag=lambdaType, rettype=rettype, tbindings=analyzedBindings, tbody=analyzedBody })
     where isLambda (TLambda { }) = True
           isLambda _             = False
           returnIsBad good (TReturn { tvalue=Just val }) = not $ isInitializeableBy good (tag val)
@@ -364,14 +364,6 @@ analyze' state (TIf { tcondition, ttruebranch, tfalsebranch }) =
     where analyzeFalseBranch state Nothing = (state, Nothing)
           analyzeFalseBranch state (Just stmt) = let (substate, analyzedStmt) = analyze' state stmt in
                                                  (substate, Just analyzedStmt)
-
--- Expects the scope level to have already been incremented
-bindLambdaList :: AnalyzerState -> [LambdaArg] -> AnalyzerState
-bindLambdaList state [] = state
-bindLambdaList state@(AnalyzerState { symbols }) (arg:args) =
-    bindLambdaList (state { symbols=Map.insert (lambdaArgName arg)
-                                               (Variable (decltypeToTypeInfo state (lambdaArgType arg)), (scopeLevel state))
-                                               symbols }) args
 
 -- Given two predicates, p and f, returns (Just Term) if (f Term) is
 -- True, otherwise recursively searches Term if (p Term) is True, or
