@@ -53,7 +53,7 @@ data Term a = TName          { tag :: a, tsrepr :: String }
             | TReturn        { tag :: a, tvalue :: Maybe (Term a) }
             | TDeref         { tag :: a, toperand :: Term a }
             | TAddr          { tag :: a, toperand :: Term a }
-            | TSubscript     { tag :: a, ttarget :: Term a, tsubscripts :: [Term a] }
+            | TSubscript     { tag :: a, ttarget :: Term a, tsubscript :: Term a }
             | TMemberAccess  { tag :: a, ttarget :: Term a, tmember :: String }
             | TTypedef       { tag :: a, ttypedefFrom :: DeclType, ttypedefTo :: String }
             | TStructLiteral { tag :: a, tstructname :: String, tfieldvalues :: [(String, Term a)] }
@@ -200,7 +200,9 @@ listToTerm ((SymbolLiteral "="):var:val:[]) = TAssign { tag=(),
                                                         tavar=sexprToTerm var,
                                                         tavalue=sexprToTerm val }
 listToTerm ((SymbolLiteral "$"):arg:[]) = TDeref { tag=(), toperand=(sexprToTerm arg) }
-listToTerm ((SymbolLiteral "$"):arr:idx:idxs) = TSubscript { tag=(), ttarget=(sexprToTerm arr), tsubscripts=((sexprToTerm idx):(map sexprToTerm idxs)) }
+listToTerm ((SymbolLiteral "$"):arr:idx:idxs) = makeSubscripts (idx:idxs) (sexprToTerm arr)
+    where makeSubscripts [] arr = arr
+          makeSubscripts (sub:subs) arr = makeSubscripts subs (TSubscript { tag=(), ttarget=arr, tsubscript=(sexprToTerm sub) })
 listToTerm x@((SymbolLiteral "$"):_) = error $ "Malformed dereference " ++ (show x)
 listToTerm ((SymbolLiteral "@"):arg:[]) = TAddr { tag=(), toperand=(sexprToTerm arg) }
 listToTerm x@((SymbolLiteral "@"):_) = error $ "Malformed address-of operand " ++ (show x)

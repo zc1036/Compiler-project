@@ -334,18 +334,21 @@ analyze' state (TIntLiteral { tirepr }) = (state, TIntLiteral { tag=intType, tir
 analyze' state (TFloatLiteral { tfrepr }) = (state, TFloatLiteral { tag=floatType, tfrepr=tfrepr })
 analyze' state (TStringLiteral { tsrepr }) = (state, TStringLiteral { tag=stringType, tsrepr=tsrepr })
 
-analyze' state subscript@(TSubscript { ttarget, tsubscripts }) =
-    case validDereferencePattern (tag analyzedTarget) (map tag analyzedSubscripts) of
+analyze' state subscript@(TSubscript { ttarget, tsubscript }) =
+    case validDereferencePattern (tag analyzedTarget) (tag analyzedSubscript) of
       Nothing           -> error $ "Invalid dereference in " ++ (show subscript)
       Just dereffedType -> (state ↖ newstate', TSubscript { tag=dereffedType,
                                                             ttarget=analyzedTarget,
-                                                            tsubscripts=analyzedSubscripts })
+                                                            tsubscript=analyzedSubscript })
     where (newstate, analyzedTarget) = analyze' state ttarget
-          (newstate', analyzedSubscripts) = analyzeWithState' (state ↖ newstate) tsubscripts
-          validDereferencePattern (Mutable x) idxs = validDereferencePattern x idxs
-          validDereferencePattern (Ptr target) (idx:idxs) = if not (isIntegral idx) then Nothing else validDereferencePattern target idxs
-          validDereferencePattern (Array _ target) (idx:idxs) = if not (isIntegral idx) then Nothing else validDereferencePattern target idxs
-          validDereferencePattern t [] = Just t
+          (newstate', analyzedSubscript) = analyze' (state ↖ newstate) tsubscript
+          validDereferencePattern (Mutable x) idx = validDereferencePattern x idx
+          validDereferencePattern (Ptr target) idx = if isIntegral idx
+                                                     then Just target
+                                                     else Nothing
+          validDereferencePattern (Array _ target) idx = if isIntegral idx
+                                                         then Just target
+                                                         else Nothing
           validDereferencePattern _ _ = Nothing
 
 analyze' state (TWhileLoop { tcondition, tbody }) =
@@ -411,9 +414,9 @@ find1 p f t@(TAddr { toperand })
     | f t = Just t
     | p t = find1 p f toperand
     | otherwise = Nothing
-find1 p f t@(TSubscript { ttarget, tsubscripts })
+find1 p f t@(TSubscript { ttarget, tsubscript })
     | f t = Just t
-    | p t = recsearch (find1 p f) (ttarget:tsubscripts)
+    | p t = recsearch (find1 p f) (ttarget:tsubscript:[])
     | otherwise = Nothing
 find1 p f t@(TMemberAccess { ttarget })
     | f t = Just t

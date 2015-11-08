@@ -26,10 +26,16 @@ data Instr = Call VReg Int [VReg] -- dst, func id, [args]
            | Return (Maybe VReg)
            | MemberAccess VReg VReg Int Int -- dst, obj, offset, size
            | Move VReg VReg
+           | Store VReg VReg
+           | StoreArray VReg VReg VReg -- v1[v2] = v3
+           | LoadArray VReg VReg VReg --  v1 = v2[v3]
+           | Load VReg VReg
            | LoadFuncAddr VReg Int
            | LoadInt VReg Integer
            | LoadFloat VReg Float
            | LoadStringPtr VReg String
+           | Add VReg VReg VReg
+           | Mult VReg VReg VReg
 
 instance Show Instr where
     show (Call dst funcid regs) = printf "call %s = funcs[%d] (%s)" (show dst) funcid (intercalate ", " $ map show regs)
@@ -38,6 +44,12 @@ instance Show Instr where
     show (Return (Just reg)) = printf "ret %s" (show reg)
     show (MemberAccess dst obj offset size) = printf "member %s = (%s + %d).%d" (show dst) (show obj) offset size
     show (Move dst src) = printf "move %s = %s" (show dst) (show src)
+    show (Load dst src) = printf "load %s = %s" (show dst) (show src)
+    show (Store dst src) = printf "store %s = %s" (show dst) (show src)
+    show (LoadArray dst arr offset) = printf "loada %s = %s[%s]" (show dst) (show arr) (show offset)
+    show (StoreArray arr offset val) = printf "storea %s[%s] = %s" (show arr) (show offset) (show val)
+    show (Add dst op1 op2) = printf "add %s = %s + %s" (show dst) (show op1) (show op2)
+    show (Mult dst op1 op2) = printf "mult %s = %s * %s" (show dst) (show op1) (show op2)
     show (LoadFuncAddr dst funcid) = printf "lfa %s = funcs[%d]" (show dst) funcid
     show (LoadInt dst int) = printf "lii %s = %d" (show dst) int
     show (LoadFloat dst float) = printf "lif %s = %f" (show dst) float
@@ -82,6 +94,9 @@ newreg :: LIRState -> Integer -> Bool -> (LIRState, VReg)
 newreg state@(LIRState { cnextVRegID }) size const = (state { cnextVRegID=cnextVRegID + 1 },
                                                       VReg { regsize=size, regid=cnextVRegID, regconst=const })
 
+newregs :: LIRState -> [(Integer, Bool)] -> (LIRState, [VReg])
+newregs = mapAccumL (\st (sz, cnst) -> newreg st sz cnst)
+
 astToLIRToplevel :: [A.TypedTerm] -> Program
 astToLIRToplevel terms =
     let (finalState, setupCode) = astToLIRToplevel' defaultCstate terms
@@ -121,7 +136,7 @@ astToLIR state (P.TStringLiteral { P.tsrepr }) =
     in (newstate, (Just reg, [LoadStringPtr reg tsrepr]))
 
 astToLIR state (P.TFuncall { P.tag, P.tfun, P.targs }) =
-    let (newstate, (Just funcreg, funcinstrs):operandsLIR) = mapAccumL (\s -> astToLIR $ state ↖ s) state (tfun:targs)
+    let (newstate, (Just funcreg, funcinstrs):operandsLIR) = mapAccumL (astToLIR . (state ↖)) state (tfun:targs)
         (newstate', callreg) = newreg newstate (A.sizeFromType tag) True
     in (state ↖ newstate', (Just callreg,
                             concat $ [funcinstrs,
@@ -158,10 +173,71 @@ astToLIR state@(LIRState { clambdas, cnextFuncID }) (P.TLambda { P.tag, P.tbody,
     in (regstate { clambdas=Map.insert cnextFuncID (FuncInstrs argRegs $ concat bodyinstrs) clambdas,
                    cnextFuncID=cnextFuncID + 1 },
         (Just funcPtrReg, [LoadFuncAddr funcPtrReg cnextFuncID]))
+      
+astToLIR state (P.TAssign { P.tavar=n@(P.TName { P.tsrepr }), P.tavalue }) =
+    let (_, (Just namereg, [])) = astToLIR state n
+        (newstate, (Just valreg, valinstrs)) = astToLIR state tavalue
+    in (state ↖ newstate, (Just namereg, valinstrs ++ [Move namereg valreg]))
+
+astToLIR state (P.TAssign { P.tavar=(P.TDeref { P.toperand }), P.tavalue }) =
+    let (newstate, (Just opreg, opinstrs)) = astToLIR state toperand
+        (newstate', (Just valreg, valinstrs)) = astToLIR (state ↖ newstate) tavalue
+    in (state ↖ newstate', (Nothing, opinstrs ++ valinstrs ++ [Store opreg valreg]))
+
+astToLIR state (P.TAssign { P.tavar=(P.TSubscript { P.ttarget, P.tsubscript }), P.tavalue }) =
+    let (newstate, (Just targetreg, targetinstrs)) = astToLIR state ttarget
+        (newstate', (Just subreg, subinstrs)) = astToLIR (state ↖ newstate) tsubscript
+        (newstate'', (Just valreg, valinstrs)) = astToLIR (state ↖ newstate') tavalue
+        (finalState, storeinstrs) = makeStore (state ↖ newstate'') (P.tag ttarget) targetreg subreg valreg
+    in (finalState, (Nothing, targetinstrs ++ subinstrs ++ valinstrs ++ storeinstrs))
+    where makeStore state (A.Mutable t) targetreg subreg valreg = makeStore state t targetreg subreg valreg
+          makeStore state (A.Array _ t) targetreg subreg valreg =
+              let (newstate, [szreg, offsetreg]) = newregs state [(A.pointerSize, True),
+                                                                  (A.pointerSize, True)]
+              in (newstate, [LoadInt szreg (A.sizeFromType t),
+                             Mult offsetreg szreg subreg,
+                             StoreArray targetreg offsetreg valreg])
+          makeStore state (A.Ptr t) targetreg subreg valreg =
+              let (newstate, [szreg, offsetreg, addrreg]) = newregs state [(A.pointerSize, True),
+                                                                           (A.pointerSize, True),
+                                                                           (A.pointerSize, True)]
+              in (newstate, [LoadInt szreg (A.sizeFromType t),
+                             Mult offsetreg szreg subreg,
+                             Add addrreg offsetreg targetreg,
+                             Store addrreg valreg])
+          makeStore _ x _ _ _ = error $ "Unexpected type in assignment to subscript: " ++ (show x)
 
 astToLIR state (P.TReturn { P.tvalue=Just val }) =
     let (newstate, (reg, instrs)) = astToLIR state val
-    in (newstate, (Nothing, instrs ++ [Return reg]))
+    in (state ↖ newstate, (Nothing, instrs ++ [Return reg]))
+
+astToLIR state (P.TDeref { P.tag, P.toperand }) =
+    let (newstate, (Just opreg, instrs)) = astToLIR state toperand
+        (newstate', valreg) = newreg (state ↖ newstate) (A.sizeFromType tag) (A.isImmutable tag)
+    in (state ↖ newstate', (Just valreg, instrs ++ [Load valreg opreg]))
+
+astToLIR state (P.TSubscript { P.tag, P.ttarget, P.tsubscript }) =
+    let (newstate, (Just targetreg, targetinstrs)) = astToLIR state ttarget
+        (newstate', (Just subreg, subinstrs)) = astToLIR (state ↖ newstate) tsubscript
+        (newstate'', outreg) = newreg (state ↖ newstate') (A.sizeFromType tag) (A.isImmutable tag)
+        (finalState, loadinstrs) = makeLoad (state ↖ newstate'') (P.tag ttarget) outreg targetreg subreg
+    in (finalState, (Just outreg, targetinstrs ++ subinstrs ++ loadinstrs))
+    where makeLoad state (A.Mutable x) outreg targetreg subreg = makeLoad state x outreg targetreg subreg
+          makeLoad state (A.Ptr t) outreg targetreg subreg = let (newstate, [szreg, offsetreg, addrreg])
+                                                                     = newregs state [(A.pointerSize, True),
+                                                                                      (A.pointerSize, True),
+                                                                                      (A.pointerSize, True)]
+                                                             in (newstate, [LoadInt szreg (A.sizeFromType t),
+                                                                            Mult offsetreg szreg subreg,
+                                                                            Add addrreg targetreg offsetreg,
+                                                                            Load outreg addrreg])
+          makeLoad state (A.Array _ t) outreg targetreg subreg = let (newstate, [szreg, offsetreg])
+                                                                         = newregs state [(A.pointerSize, True),
+                                                                                          (A.pointerSize, True)]
+                                                                 in (newstate, [LoadInt szreg (A.sizeFromType t),
+                                                                                Mult offsetreg szreg subreg,
+                                                                                LoadArray outreg targetreg offsetreg])
+          makeLoad _ t _ _ _ = error $ "Unexpected type in load from subscript: " ++ (show t)
 
 astToLIR state (P.TReturn { P.tvalue=Nothing }) =
     (state, (Nothing, [Return Nothing]))
