@@ -119,7 +119,7 @@ sizeFromType t@(Unqualified (BuiltinType { typeid }))
     | typeid == voidTypeID = error "void has no size"
     | typeid == nullTypeID = pointerSize
     | otherwise = error $ "Unexpected builtin type " ++ (show t)
-sizeFromType (Unqualified (Struct { fields })) = foldl (+) 0 $ map (sizeFromType . snd) fields
+sizeFromType (Unqualified (Struct { fields })) = max 1 $ foldl (+) 0 $ map (sizeFromType . snd) fields
 sizeFromType (Function { }) = error "Functions have no size"
 
 decltypeToTypeInfo :: AnalyzerState -> DeclType -> QualifiedTypeInfo
@@ -267,11 +267,10 @@ analyze' state@(AnalyzerState { symbols }) (TStructLiteral { tstructname, tfield
           analyzeFieldValues' structFields (state, fieldsAssigned) (fieldname, fieldinit)
               | Set.member fieldname fieldsAssigned = error $ "Member " ++ fieldname ++ " is already initialized in " ++ tstructname ++ " structure literal"
               | otherwise = case lookup fieldname structFields of
-                              Just declaredFieldType -> let (newstate, analyzedInitializer) = analyze' state fieldinit in
-                                                        if isInitializeableBy declaredFieldType (tag analyzedInitializer) then
-                                                            ((newstate, (Set.insert fieldname fieldsAssigned)), (fieldname, analyzedInitializer))
-                                                        else
-                                                            error $ printf "Value of type %s cannot be used to initialize field %s of type %s in struct %s (in structure literal)" (show (tag analyzedInitializer)) fieldname (show declaredFieldType) tstructname
+                              Just declaredFieldType -> let (newstate, analyzedInitializer) = analyze' state fieldinit
+                                                        in if isInitializeableBy declaredFieldType (tag analyzedInitializer)
+                                                           then ((newstate, (Set.insert fieldname fieldsAssigned)), (fieldname, analyzedInitializer))
+                                                           else error $ printf "Value of type %s cannot be used to initialize field %s of type %s in struct %s (in structure literal)" (show (tag analyzedInitializer)) fieldname (show declaredFieldType) tstructname
                               _ -> error $ "Structure " ++ tstructname ++ " has no member named " ++ fieldname ++ " (in structure literal)"
 
 analyze' state (TMemberAccess { ttarget, tmember }) =

@@ -7,7 +7,7 @@ import qualified Parser as P
 import qualified Analyzer as A
 import Data.Maybe
 import qualified Data.Map.Strict as Map
-import Data.List (mapAccumL, intercalate, findIndex)
+import Data.List (mapAccumL, intercalate, findIndex, lookup)
 import Text.Printf
 import Debug.Trace
 
@@ -35,6 +35,7 @@ data Instr = Call VReg Int [VReg] -- dst, func id, [args]
            | LoadFloat VReg Float
            | LoadStringPtr VReg String
            | LoadStructMember VReg VReg Int -- dst src offset (size of load is in the dst register)
+           | StoreStructMember VReg Int VReg -- obj offset src (size of store is in src register)
            | Add VReg VReg VReg
            | Mult VReg VReg VReg
 
@@ -48,8 +49,9 @@ instance Show Instr where
     show (Store dst src) = printf "store %s = %s" (show dst) (show src)
     show (LoadArray dst arr offset) = printf "loada %s = %s[%s]" (show dst) (show arr) (show offset)
     show (StoreArray arr offset val) = printf "storea %s[%s] = %s" (show arr) (show offset) (show val)
-    show (LoadAddressOf dst obj) = printf "lao %s = & %s" (show dst) (show obj)
-    show (LoadStructMember dst obj offset) = printf "member %s = (%s[%d..$d])" (show dst) (show obj) offset (regsize dst)
+    show (LoadAddressOf dst obj) = printf "loa %s = & %s" (show dst) (show obj)
+    show (LoadStructMember dst obj offset) = printf "amember %s = %s[%d..%d]" (show dst) (show obj) offset (regsize dst)
+    show (StoreStructMember obj offset src) = printf "smember %s[%d..%d] = %s" (show obj) offset (regsize src) (show src) 
     show (Add dst op1 op2) = printf "add %s = %s + %s" (show dst) (show op1) (show op2)
     show (Mult dst op1 op2) = printf "mult %s = %s * %s" (show dst) (show op1) (show op2)
     show (LoadFuncAddr dst funcid) = printf "lfa %s = funcs[%d]" (show dst) funcid
@@ -210,7 +212,10 @@ astToLIR state (P.TAssign { P.tavar=(P.TSubscript { P.ttarget, P.tsubscript }), 
                              Mult offsetreg szreg subreg,
                              Add addrreg offsetreg targetreg,
                              Store addrreg valreg])
-          makeStore _ x _ _ _ = error $ "Unexpected type in assignment to subscript: " ++ (show x)
+          makeStore _ x _ _ _ = error $ "Bug: Unexpected type in assignment to subscript: " ++ (show x)
+
+astToLIR state (P.TAssign { P.tavar }) =
+    error $ "Bug: Unexpected form in lhs of assignment: " ++ (show tavar)
 
 astToLIR state (P.TReturn { P.tvalue=Just val }) =
     let (newstate, (reg, instrs)) = astToLIR state val
@@ -242,7 +247,7 @@ astToLIR state (P.TSubscript { P.tag, P.ttarget, P.tsubscript }) =
                                                                  in (newstate, [LoadInt szreg (A.sizeFromType t),
                                                                                 Mult offsetreg szreg subreg,
                                                                                 LoadArray outreg targetreg offsetreg])
-          makeLoad _ t _ _ _ = error $ "Unexpected type in load from subscript: " ++ (show t)
+          makeLoad _ t _ _ _ = error $ "Bug: Unexpected type in load from subscript: " ++ (show t)
 
 astToLIR state (P.TAddr { P.toperand }) =
     let (newstate, (Just opreg, instrs)) = astToLIR state toperand
@@ -257,9 +262,30 @@ astToLIR state (P.TMemberAccess { P.ttarget, P.tmember, P.tag }) =
           memberOffset (A.Unqualified (A.Struct { A.fields, A.fieldOffsets })) =
               fromIntegral $ fieldOffsets !! (fromJust $ findIndex (\x -> fst x == tmember) fields)
 
+astToLIR state (P.TStructLiteral { P.tag, P.tfieldvalues }) =
+    -- we synthesize a variable definition and a bunch of assignments,
+    -- and return the code generated.
+    -- We don't need a unique name for #tmp_var here, because it will
+    -- shadow previous names and later names will shadow it.
+    let tmpvarname = "#tmp_var"
+        tmpvar = P.TDef { P.tag=A.voidType, P.vartag=tag, P.tname=tmpvarname, P.ttype=undefined, P.tvalue=Nothing }
+        assignments = map (makeAssignment tmpvar $ P.TName { P.tag=tag, P.tsrepr=tmpvarname }) tfieldvalues
+        (newstate, instrs) = astToLIRToplevel' state (tmpvar:assignments)
+    in (state ↖ newstate, (Just $ snd $ (csymbols newstate) Map.! tmpvarname, concat instrs))
+    where makeAssignment tmpvar varname (fieldname, fieldvalue) =
+              P.TAssign { P.tag=A.voidType,
+                          P.tavar=P.TMemberAccess { -- we can just wrap it because it's always immutable
+                                                    P.tag=A.Mutable (fromJust $ lookup fieldname (structFields tag)),
+                                                    P.ttarget=varname,
+                                                    P.tmember=fieldname },
+                          P.tavalue=fieldvalue }
+          structFields (A.Unqualified (A.Struct { A.fields })) = fields
+          structFields x = error $ "Unexpected type in getStructFromType: " ++ (show x)
+
 astToLIR state (P.TReturn { P.tvalue=Nothing }) =
     (state, (Nothing, [Return Nothing]))
 
+astToLIR state (P.TTypedef { }) = (state, (Nothing, []))
 astToLIR state (P.TStruct { }) = (state, (Nothing, []))
 
 astToLIR _ _ = error "Bug: Unexpected form in astToLIR"

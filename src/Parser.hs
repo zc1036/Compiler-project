@@ -65,7 +65,7 @@ data Term a = TName          { tag :: a, tsrepr :: String }
 -- Parser functions
 
 symbolChars :: String
-symbolChars = ".!#$%&|*+-/:<=>?@^_~" ++ ['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9']
+symbolChars = ".!$%&|*+-/:<=>?@^_~" ++ ['a'..'z'] ++ ['A'..'Z'] ++ ['0'..'9']
 
 lispsymbol :: Parser SExpr
 lispsymbol = liftM SymbolLiteral (many1 (oneOf symbolChars))
