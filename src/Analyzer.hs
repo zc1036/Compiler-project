@@ -12,7 +12,7 @@ import qualified Data.Set as Set
 import Text.Printf
 
 data TypeInfo = BuiltinType { typeid :: Int, name :: String }
-              | Struct { typeid :: Int, fields :: [(String, QualifiedTypeInfo)], name :: String }
+              | Struct { typeid :: Int, fields :: [(String, QualifiedTypeInfo)], fieldOffsets :: [Integer], name :: String }
 
 instance Show TypeInfo where
     show (BuiltinType { name }) = "[builtin " ++ name ++ "]"
@@ -280,9 +280,10 @@ analyze' state (TMemberAccess { ttarget, tmember }) =
     -- memberAccess builds up pointer dereferences until it gets to
     -- the underlying struct type, then returns a TMemberAccess to the
     -- member.
-    where memberAccess term (Unqualified (Struct { fields, name=structName })) = case lookup tmember fields of
-                                                                                   Just fieldType -> TMemberAccess { tag=fieldType, ttarget=term, tmember=tmember }
-                                                                                   _ -> error $ "Structure of type " ++ structName ++ " has no member named " ++ tmember
+    where memberAccess term (Unqualified (Struct { fields, name=structName })) =
+              case lookup tmember fields of
+                Just fieldType -> TMemberAccess { tag=fieldType, ttarget=term, tmember=tmember }
+                _ -> error $ "Structure of type " ++ structName ++ " has no member named " ++ tmember
           memberAccess term (Mutable unqualified@(Unqualified (Struct { }))) = let access = memberAccess term unqualified in
                                                                                access { tag=Mutable (tag access) }
           memberAccess term (Mutable mtype) = memberAccess term mtype
@@ -306,11 +307,18 @@ analyze' state@(AnalyzerState { symbols, scopeLevel }) (TTypedef { ttypedefFrom,
 analyze' state@(AnalyzerState { symbols, scopeLevel, nextTypeID }) (TStruct { tfields, tname })
     | isRedeclaration tname symbols scopeLevel = error $ "Duplicate declaration of " ++ tname ++ " in struct definition"
     | otherwise = (newstate, TStruct { tag=voidType, tfields=tfields, tname=tname })
-    where newstate = state { symbols=Map.insert tname (Type (Unqualified (Struct { typeid=nextTypeID, fields=map processFields tfields, name=tname })), scopeLevel) symbols,
+    where newstate = state { symbols=Map.insert tname (Type (Unqualified (Struct { typeid=nextTypeID,
+                                                                                   fields=processedFields,
+                                                                                   fieldOffsets=snd $ mapAccumL calcFieldOffset 0 $ map snd processedFields, 
+                                                                                   name=tname })), scopeLevel) symbols,
                              nextTypeID=nextTypeID + 1 }
-          processFields (name, decltype) = (name, checkFieldType name $ decltypeToTypeInfo newstate decltype)
+          processedFields = map processField tfields
+          processField (name, decltype) = (name, checkFieldType name $ decltypeToTypeInfo newstate decltype)
           checkFieldType name (Mutable _) = error $ "Cannot specify mutability of structure member " ++ name ++ " in definition of struct " ++ tname
           checkFieldType _ t = t
+          calcFieldOffset offset t = let memberSize = (sizeFromType t)
+                                         padding = (memberSize - (offset `mod` memberSize)) `mod` memberSize
+                                     in (offset + padding + memberSize, offset)
 
 analyze' state (TReturn { tvalue=Nothing }) = (state, TReturn { tag=voidType, tvalue=Nothing })
 
