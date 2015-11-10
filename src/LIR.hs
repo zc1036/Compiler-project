@@ -49,9 +49,9 @@ instance Show Instr where
     show (Store dst src) = printf "store %s = %s" (show dst) (show src)
     show (LoadArray dst arr offset) = printf "loada %s = %s[%s]" (show dst) (show arr) (show offset)
     show (StoreArray arr offset val) = printf "storea %s[%s] = %s" (show arr) (show offset) (show val)
-    show (LoadAddressOf dst obj) = printf "loa %s = & %s" (show dst) (show obj)
-    show (LoadStructMember dst obj offset) = printf "amember %s = %s[%d..%d]" (show dst) (show obj) offset (regsize dst)
-    show (StoreStructMember obj offset src) = printf "smember %s[%d..%d] = %s" (show obj) offset (regsize src) (show src) 
+    show (LoadAddressOf dst obj) = printf "la %s = & %s" (show dst) (show obj)
+    show (LoadStructMember dst obj offset) = printf "amember %s = %s[%d:%d]" (show dst) (show obj) offset (offset + (fromIntegral . regsize $ dst))
+    show (StoreStructMember obj offset src) = printf "smember %s[%d:%d] = %s" (show obj) offset (offset + (fromIntegral . regsize $ src)) (show src) 
     show (Add dst op1 op2) = printf "add %s = %s + %s" (show dst) (show op1) (show op2)
     show (Mult dst op1 op2) = printf "mult %s = %s * %s" (show dst) (show op1) (show op2)
     show (LoadFuncAddr dst funcid) = printf "lfa %s = funcs[%d]" (show dst) funcid
@@ -186,7 +186,7 @@ astToLIR state (P.TAssign { P.tavar=n@(P.TName { P.tsrepr }), P.tavalue }) =
         (newstate, (Just valreg, valinstrs)) = astToLIR state tavalue
     in (state ↖ newstate, (Just namereg, valinstrs ++ [Move namereg valreg]))
 
-astToLIR state (P.TAssign { P.tavar=(P.TDeref { P.toperand }), P.tavalue }) =
+astToLIR state (P.TAssign { P.tavar=P.TDeref { P.toperand }, P.tavalue }) =
     let (newstate, (Just opreg, opinstrs)) = astToLIR state toperand
         (newstate', (Just valreg, valinstrs)) = astToLIR (state ↖ newstate) tavalue
     in (state ↖ newstate', (Nothing, opinstrs ++ valinstrs ++ [Store opreg valreg]))
@@ -213,6 +213,12 @@ astToLIR state (P.TAssign { P.tavar=(P.TSubscript { P.ttarget, P.tsubscript }), 
                              Add addrreg offsetreg targetreg,
                              Store addrreg valreg])
           makeStore _ x _ _ _ = error $ "Bug: Unexpected type in assignment to subscript: " ++ (show x)
+
+astToLIR state (P.TAssign { P.tavar=P.TMemberAccess { P.ttarget, P.tmember }, P.tavalue }) =
+    let (newstate, (Just objreg, objinstrs)) = astToLIR state ttarget
+        (newstate', (Just srcreg, srcinstrs)) = astToLIR (state ↖ newstate) tavalue
+    in (state ↖ newstate',
+        (Nothing, objinstrs ++ srcinstrs ++ [StoreStructMember objreg (A.memberOffset (P.tag ttarget) tmember) srcreg]))
 
 astToLIR state (P.TAssign { P.tavar }) =
     error $ "Bug: Unexpected form in lhs of assignment: " ++ (show tavar)
@@ -257,10 +263,8 @@ astToLIR state (P.TAddr { P.toperand }) =
 astToLIR state (P.TMemberAccess { P.ttarget, P.tmember, P.tag }) =
     let (newstate, (Just opreg, opinstrs)) = astToLIR state ttarget
         (newstate', dstreg) = newreg (state ↖ newstate) (A.sizeFromType tag) (A.isImmutable tag)
-    in (state ↖ newstate', (Just dstreg, opinstrs ++ [LoadStructMember dstreg opreg $ memberOffset (P.tag ttarget)]))
-    where memberOffset (A.Mutable x) = memberOffset x
-          memberOffset (A.Unqualified (A.Struct { A.fields, A.fieldOffsets })) =
-              fromIntegral $ fieldOffsets !! (fromJust $ findIndex (\x -> fst x == tmember) fields)
+    in (state ↖ newstate',
+        (Just dstreg, opinstrs ++ [LoadStructMember dstreg opreg $ A.memberOffset (P.tag ttarget) tmember]))
 
 astToLIR state (P.TStructLiteral { P.tag, P.tfieldvalues }) =
     -- we synthesize a variable definition and a bunch of assignments,

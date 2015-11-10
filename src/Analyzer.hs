@@ -7,7 +7,7 @@ import Utils (makeMap, recsearch)
 import Parser
 import Data.Maybe
 import qualified Data.Map.Strict as Map
-import Data.List (intercalate, mapAccumL, elemIndex, lookup)
+import Data.List (intercalate, mapAccumL, elemIndex, findIndex, lookup)
 import qualified Data.Set as Set
 import Text.Printf
 
@@ -28,6 +28,12 @@ data QualifiedTypeInfo = Ptr QualifiedTypeInfo
                        | Mutable QualifiedTypeInfo
                        | Function QualifiedTypeInfo [QualifiedTypeInfo]
                        | Unqualified TypeInfo
+
+memberOffset :: QualifiedTypeInfo -> String -> Int
+memberOffset (Mutable x) fieldname = memberOffset x fieldname
+memberOffset (Unqualified (Struct { fields, fieldOffsets })) fieldname =
+    fromIntegral $ fieldOffsets !! (fromJust $ findIndex (\x -> fst x == fieldname) fields)
+memberOffset x _ = error $ "Unexpected type given to memberOffset: " ++ (show x)
 
 functionPtrArgs :: QualifiedTypeInfo -> [QualifiedTypeInfo]
 functionPtrArgs (Ptr (Function _ argtypes)) = argtypes
