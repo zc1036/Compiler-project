@@ -26,12 +26,6 @@ instance Show SExpr where
     show (StringLiteral x) = show x
     show (List x) = "(" ++ (intercalate " " $ map show x) ++ ")"
 
--- The difference between DeclType here and TBuiltinType below is that
--- the DeclTypes are the "objects" and the TBuiltinTypes are the
--- handles/names that refer to those objects. That is to say, a
--- TBuiltinType is an object in the language, but a DeclType is only
--- known to the compiler.
-
 data DeclType = DeclPtr DeclType
               | DeclArray Integer DeclType
               | DeclMutable DeclType
@@ -40,7 +34,8 @@ data DeclType = DeclPtr DeclType
                 deriving (Show)
 
 -- The type variable "a" allows storing arbitrary data in the tree
--- structure in the "tag" field
+-- structure in the "tag" field; this is used by e.g. the semantic
+-- analyzer to store type information.
 data Term a = TName          { tag :: a, tsrepr :: String }
             | TIntLiteral    { tag :: a, tirepr :: Integer }
             | TFloatLiteral  { tag :: a, tfrepr :: Float }

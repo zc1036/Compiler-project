@@ -194,10 +194,12 @@ analyze' :: AnalyzerState -> Term () -> (AnalyzerState, TypedTerm)
 analyze' state@(AnalyzerState { symbols, scopeLevel, nextTypeID }) (TDef { tname, ttype, tvalue })
     | (isRedeclaration tname symbols scopeLevel) = error $ tname ++ " redefined"
     | initializerTypeError = error $ "Types " ++ (show typeOfVar) ++ " and " ++ (show (fromJust typeOfValue)) ++ " are incompatible "
-    | otherwise = ((state { symbols=Map.insert tname (Variable typeOfVar, scopeLevel) symbols }) ↖ newstate,
+    | otherwise = (newstate ↖ substate,
                    TDef { tag=voidType, vartag=typeOfVar, tname=tname, ttype=ttype, tvalue=analyzedValue })
-    where (newstate, analyzedValue) = case tvalue of
-                                        Just declvalue -> let (substate, analyzed) = analyze' state declvalue
+    where newstate = (state { symbols=Map.insert tname (Variable typeOfVar, scopeLevel) symbols })
+          (substate, analyzedValue) = case tvalue of
+                                        -- Analyze the initialization after adding the definition to the symbol table
+                                        Just declvalue -> let (substate, analyzed) = analyze' newstate declvalue
                                                           in (substate, Just analyzed)
                                         Nothing        -> (state, Nothing)
           typeOfVar = let vartype = (decltypeToTypeInfo state ttype) in

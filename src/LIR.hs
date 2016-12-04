@@ -155,14 +155,11 @@ astToLIR state (P.TFuncall { P.tag, P.tfun, P.targs }) =
                                       [ICall callreg funcreg $ map (fromJust . fst) operandsLIR]]))
 
 astToLIR state@(LIRState { csymbols, scopeLevel }) (P.TDef { P.vartag, P.tname, P.tvalue=Just val }) =
-    let (newstate, (Just valuereg, valueinstrs)) = astToLIR state val
-        ((newstate', reg), optionalMoveInstr) =
-            -- we only need the MOVE if the register sizes are different or either reg is mutable
-            if varsize == regsize valuereg && A.isImmutable vartag && regconst valuereg
-            then ((state ↖ newstate, valuereg), [])
-            else (newreg (state ↖ newstate) varsize (A.isImmutable vartag), [Move reg valuereg])
-    in ((state ↖ newstate') { csymbols=Map.insert tname (scopeLevel, reg) csymbols },
-        (Just reg, valueinstrs ++ optionalMoveInstr))
+    let statewithsym = state { csymbols=Map.insert tname (scopeLevel, reg) csymbols }
+        (newstate, (Just valuereg, valueinstrs)) = astToLIR statewithsym val
+        (newstate', reg) = newreg (statewithsym ↖ newstate) varsize (A.isImmutable vartag)
+    in ((statewithsym ↖ newstate') ,
+        (Just reg, valueinstrs ++ [ Move reg valuereg ]))
     where varsize = A.sizeFromType vartag
 
 astToLIR state@(LIRState { csymbols, scopeLevel }) (P.TDef { P.vartag, P.tname, P.tvalue=Nothing }) =
